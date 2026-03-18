@@ -37,6 +37,7 @@ import java.util.regex.Pattern;
 
 /**
  * Extracts library metadata from a JAR file using three sources in priority order:
+ *
  * <ol>
  *   <li>META-INF/maven/[groupId]/[artifactId]/pom.properties - most reliable for Maven artifacts
  *   <li>META-INF/MANIFEST.MF - Implementation-Title / Implementation-Version
@@ -48,11 +49,10 @@ public final class JarMetadataExtractor {
   private static final Logger logger = Logger.getLogger(JarMetadataExtractor.class.getName());
 
   /**
-   * Matches {@code name-version.jar} patterns where version starts with a digit.
-   * Handles common separators, e.g. guava-32.1.3-jre, log4j-core-2.20.0.
+   * Matches {@code name-version.jar} patterns where version starts with a digit. Handles common
+   * separators, e.g. guava-32.1.3-jre, log4j-core-2.20.0.
    */
-  static final Pattern FILENAME_VERSION_PATTERN =
-      Pattern.compile("^(.+?)[-_](\\d[\\w.\\-]*)$");
+  static final Pattern FILENAME_VERSION_PATTERN = Pattern.compile("^(.+?)[-_](\\d[\\w.\\-]*)$");
 
   private JarMetadataExtractor() {}
 

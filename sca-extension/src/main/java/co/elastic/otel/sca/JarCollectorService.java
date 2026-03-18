@@ -87,14 +87,12 @@ public final class JarCollectorService implements ClassFileTransformer {
       AttributeKey.stringKey("library.sha256");
   private static final AttributeKey<String> ATTR_LIBRARY_CHECKSUM_SHA256 =
       AttributeKey.stringKey("library.checksum.sha256");
-  private static final AttributeKey<String> ATTR_LIBRARY_ID =
-      AttributeKey.stringKey("library.id");
+  private static final AttributeKey<String> ATTR_LIBRARY_ID = AttributeKey.stringKey("library.id");
   private static final AttributeKey<String> ATTR_LIBRARY_CLASSLOADER =
       AttributeKey.stringKey("library.classloader");
 
   // Event identity (FIX 4)
-  private static final AttributeKey<String> ATTR_EVENT_NAME =
-      AttributeKey.stringKey("event.name");
+  private static final AttributeKey<String> ATTR_EVENT_NAME = AttributeKey.stringKey("event.name");
   private static final AttributeKey<String> ATTR_EVENT_DOMAIN =
       AttributeKey.stringKey("event.domain");
   private static final AttributeKey<String> ATTR_EVENT_ACTION =
@@ -111,8 +109,7 @@ public final class JarCollectorService implements ClassFileTransformer {
       AttributeKey.stringKey("deployment.environment.name");
 
   // Host and process (FIX 3)
-  private static final AttributeKey<String> ATTR_HOST_NAME =
-      AttributeKey.stringKey("host.name");
+  private static final AttributeKey<String> ATTR_HOST_NAME = AttributeKey.stringKey("host.name");
   private static final AttributeKey<String> ATTR_PROCESS_PID =
       AttributeKey.stringKey("process.pid");
   private static final AttributeKey<String> ATTR_PROCESS_RUNTIME_NAME =
@@ -121,10 +118,8 @@ public final class JarCollectorService implements ClassFileTransformer {
       AttributeKey.stringKey("process.runtime.version");
 
   // Agent identity (FIX 7)
-  private static final AttributeKey<String> ATTR_AGENT_NAME =
-      AttributeKey.stringKey("agent.name");
-  private static final AttributeKey<String> ATTR_AGENT_TYPE =
-      AttributeKey.stringKey("agent.type");
+  private static final AttributeKey<String> ATTR_AGENT_NAME = AttributeKey.stringKey("agent.name");
+  private static final AttributeKey<String> ATTR_AGENT_TYPE = AttributeKey.stringKey("agent.type");
   private static final AttributeKey<String> ATTR_AGENT_VERSION =
       AttributeKey.stringKey("agent.version");
   private static final AttributeKey<String> ATTR_AGENT_EPHEMERAL_ID =
@@ -325,12 +320,13 @@ public final class JarCollectorService implements ClassFileTransformer {
 
   private void processQueue() {
     // FIX 5: set schemaUrl and instrumentationVersion on the OTel logger
-    Logger otelLogger = openTelemetry
-        .getLogsBridge()
-        .loggerBuilder("co.elastic.otel.sca")
-        .setSchemaUrl(OTEL_SCHEMA_URL)
-        .setInstrumentationVersion(resourceCtx.agentVersion)
-        .build();
+    Logger otelLogger =
+        openTelemetry
+            .getLogsBridge()
+            .loggerBuilder("co.elastic.otel.sca")
+            .setSchemaUrl(OTEL_SCHEMA_URL)
+            .setInstrumentationVersion(resourceCtx.agentVersion)
+            .build();
 
     // Token-bucket style rate limiter: track the earliest time the next JAR may be emitted
     long nextEmitNanos = System.nanoTime();
@@ -388,48 +384,51 @@ public final class JarCollectorService implements ClassFileTransformer {
 
   private void emitLogRecord(JarMetadata meta, Logger otelLogger) {
     // FIX 6: descriptive body format
-    String coords = meta.groupId.isEmpty()
-        ? meta.name + ":" + meta.version
-        : meta.groupId + ":" + meta.name + ":" + meta.version;
+    String coords =
+        meta.groupId.isEmpty()
+            ? meta.name + ":" + meta.version
+            : meta.groupId + ":" + meta.name + ":" + meta.version;
     String body = "JAR loaded: " + coords + " path=" + meta.jarPath;
 
     // Maven coordinate for CVE advisory matching: groupId:artifactId:version
-    String libraryId = meta.groupId.isEmpty()
-        ? meta.name + ":" + meta.version
-        : meta.groupId + ":" + meta.name + ":" + meta.version;
+    String libraryId =
+        meta.groupId.isEmpty()
+            ? meta.name + ":" + meta.version
+            : meta.groupId + ":" + meta.name + ":" + meta.version;
 
-    AttributesBuilder attrs = Attributes.builder()
-        // Library identity (FIX 1)
-        .put(ATTR_LIBRARY_NAME, meta.name)
-        .put(ATTR_LIBRARY_VERSION, meta.version)
-        .put(ATTR_LIBRARY_GROUP_ID, meta.groupId)
-        .put(ATTR_LIBRARY_ID, libraryId)
-        .put(ATTR_LIBRARY_TYPE, "jar")
-        .put(ATTR_LIBRARY_LANGUAGE, "java")
-        .put(ATTR_LIBRARY_PATH, meta.jarPath)
-        .put(ATTR_LIBRARY_PURL, meta.purl)
-        .put(ATTR_LIBRARY_SHA256, meta.sha256)
-        .put(ATTR_LIBRARY_CHECKSUM_SHA256, meta.sha256)
-        .put(ATTR_LIBRARY_CLASSLOADER, meta.classloaderName)
-        // Event identity (FIX 4)
-        .put(ATTR_EVENT_NAME, "co.elastic.otel.sca.library.loaded")
-        .put(ATTR_EVENT_DOMAIN, "sca")
-        .put(ATTR_EVENT_ACTION, "library-loaded")
-        // Service identity (FIX 3)
-        .put(ATTR_SERVICE_NAME, resourceCtx.serviceName)
-        .put(ATTR_SERVICE_VERSION, resourceCtx.serviceVersion)
-        // Deployment (FIX 2)
-        .put(ATTR_DEPLOYMENT_ENV, resourceCtx.deploymentEnv)
-        // Host and process (FIX 1 + 3)
-        .put(ATTR_HOST_NAME, resourceCtx.hostName)
-        .put(ATTR_PROCESS_PID, resourceCtx.processPid)
-        .put(ATTR_PROCESS_RUNTIME_NAME, resourceCtx.processRuntimeName)
-        .put(ATTR_PROCESS_RUNTIME_VERSION, resourceCtx.processRuntimeVersion)
-        // Agent identity (FIX 7)
-        .put(ATTR_AGENT_NAME, "elastic-otel-java")
-        .put(ATTR_AGENT_TYPE, "opentelemetry")
-        .put(ATTR_AGENT_VERSION, resourceCtx.agentVersion)
-        .put(ATTR_AGENT_EPHEMERAL_ID, resourceCtx.ephemeralId);
+    AttributesBuilder attrs =
+        Attributes.builder()
+            // Library identity (FIX 1)
+            .put(ATTR_LIBRARY_NAME, meta.name)
+            .put(ATTR_LIBRARY_VERSION, meta.version)
+            .put(ATTR_LIBRARY_GROUP_ID, meta.groupId)
+            .put(ATTR_LIBRARY_ID, libraryId)
+            .put(ATTR_LIBRARY_TYPE, "jar")
+            .put(ATTR_LIBRARY_LANGUAGE, "java")
+            .put(ATTR_LIBRARY_PATH, meta.jarPath)
+            .put(ATTR_LIBRARY_PURL, meta.purl)
+            .put(ATTR_LIBRARY_SHA256, meta.sha256)
+            .put(ATTR_LIBRARY_CHECKSUM_SHA256, meta.sha256)
+            .put(ATTR_LIBRARY_CLASSLOADER, meta.classloaderName)
+            // Event identity (FIX 4)
+            .put(ATTR_EVENT_NAME, "co.elastic.otel.sca.library.loaded")
+            .put(ATTR_EVENT_DOMAIN, "sca")
+            .put(ATTR_EVENT_ACTION, "library-loaded")
+            // Service identity (FIX 3)
+            .put(ATTR_SERVICE_NAME, resourceCtx.serviceName)
+            .put(ATTR_SERVICE_VERSION, resourceCtx.serviceVersion)
+            // Deployment (FIX 2)
+            .put(ATTR_DEPLOYMENT_ENV, resourceCtx.deploymentEnv)
+            // Host and process (FIX 1 + 3)
+            .put(ATTR_HOST_NAME, resourceCtx.hostName)
+            .put(ATTR_PROCESS_PID, resourceCtx.processPid)
+            .put(ATTR_PROCESS_RUNTIME_NAME, resourceCtx.processRuntimeName)
+            .put(ATTR_PROCESS_RUNTIME_VERSION, resourceCtx.processRuntimeVersion)
+            // Agent identity (FIX 7)
+            .put(ATTR_AGENT_NAME, "elastic-otel-java")
+            .put(ATTR_AGENT_TYPE, "opentelemetry")
+            .put(ATTR_AGENT_VERSION, resourceCtx.agentVersion)
+            .put(ATTR_AGENT_EPHEMERAL_ID, resourceCtx.ephemeralId);
 
     // Container / k8s — only emit when present (FIX 8)
     if (!resourceCtx.containerId.isEmpty()) {
@@ -454,7 +453,8 @@ public final class JarCollectorService implements ClassFileTransformer {
   private boolean shouldSkip(String jarPath) {
     // Always skip the EDOT / upstream OTel agent JAR
     String fileName = new File(jarPath).getName();
-    if (fileName.contains("elastic-otel-javaagent") || fileName.contains("opentelemetry-javaagent")) {
+    if (fileName.contains("elastic-otel-javaagent")
+        || fileName.contains("opentelemetry-javaagent")) {
       return true;
     }
     if (agentJarPath != null && agentJarPath.equals(jarPath)) {
@@ -474,8 +474,8 @@ public final class JarCollectorService implements ClassFileTransformer {
 
   /**
    * Best-effort: resolve the path of the agent JAR so we can exclude it from reporting. The test
-   * harness in {@code custom} sets {@code elastic.otel.agent.jar.path}; in production we scan
-   * the command line.
+   * harness in {@code custom} sets {@code elastic.otel.agent.jar.path}; in production we scan the
+   * command line.
    */
   private static String resolveAgentJarPath() {
     String path = System.getProperty("elastic.otel.agent.jar.path");
@@ -511,8 +511,8 @@ public final class JarCollectorService implements ClassFileTransformer {
 
   /**
    * Pre-extracted context attributes that are identical for every log record emitted by this
-   * service instance. Built once at startup in {@link SCAExtension#afterAgent} and passed into
-   * the constructor, avoiding repeated system-property lookups on the hot path.
+   * service instance. Built once at startup in {@link SCAExtension#afterAgent} and passed into the
+   * constructor, avoiding repeated system-property lookups on the hot path.
    */
   static final class ResourceContext {
     final String deploymentEnv;
@@ -530,10 +530,19 @@ public final class JarCollectorService implements ClassFileTransformer {
     final String k8sNodeName;
 
     private ResourceContext(
-        String deploymentEnv, String serviceName, String serviceVersion,
-        String hostName, String processPid, String processRuntimeName,
-        String processRuntimeVersion, String agentVersion, String ephemeralId,
-        String containerId, String k8sPodName, String k8sNamespace, String k8sNodeName) {
+        String deploymentEnv,
+        String serviceName,
+        String serviceVersion,
+        String hostName,
+        String processPid,
+        String processRuntimeName,
+        String processRuntimeVersion,
+        String agentVersion,
+        String ephemeralId,
+        String containerId,
+        String k8sPodName,
+        String k8sNamespace,
+        String k8sNodeName) {
       this.deploymentEnv = deploymentEnv;
       this.serviceName = serviceName;
       this.serviceVersion = serviceVersion;
@@ -555,14 +564,16 @@ public final class JarCollectorService implements ClassFileTransformer {
      */
     static ResourceContext build(AutoConfiguredOpenTelemetrySdk sdk, String ephemeralId) {
       String deploymentEnv = resolveDeploymentEnv();
-      String serviceName = coalesce(
-          System.getProperty("otel.service.name"),
-          System.getenv("OTEL_SERVICE_NAME"),
-          "unknown_service");
-      String serviceVersion = coalesce(
-          System.getProperty("otel.service.version"),
-          System.getenv("OTEL_SERVICE_VERSION"),
-          "");
+      String serviceName =
+          coalesce(
+              System.getProperty("otel.service.name"),
+              System.getenv("OTEL_SERVICE_NAME"),
+              "unknown_service");
+      String serviceVersion =
+          coalesce(
+              System.getProperty("otel.service.version"),
+              System.getenv("OTEL_SERVICE_VERSION"),
+              "");
       String hostName = resolveHostName();
       String processPid = resolveProcessPid();
       String processRuntimeName = coalesce(System.getProperty("java.runtime.name"), "");
@@ -577,8 +588,7 @@ public final class JarCollectorService implements ClassFileTransformer {
       String k8sNamespace = "";
       String k8sNodeName = "";
       try {
-        java.lang.reflect.Method getResource =
-            sdk.getClass().getDeclaredMethod("getResource");
+        java.lang.reflect.Method getResource = sdk.getClass().getDeclaredMethod("getResource");
         getResource.setAccessible(true);
         Resource resource = (Resource) getResource.invoke(sdk);
         containerId = resourceAttr(resource, "container.id");
@@ -590,9 +600,19 @@ public final class JarCollectorService implements ClassFileTransformer {
       }
 
       return new ResourceContext(
-          deploymentEnv, serviceName, serviceVersion, hostName, processPid,
-          processRuntimeName, processRuntimeVersion, agentVersion, ephemeralId,
-          containerId, k8sPodName, k8sNamespace, k8sNodeName);
+          deploymentEnv,
+          serviceName,
+          serviceVersion,
+          hostName,
+          processPid,
+          processRuntimeName,
+          processRuntimeVersion,
+          agentVersion,
+          ephemeralId,
+          containerId,
+          k8sPodName,
+          k8sNamespace,
+          k8sNodeName);
     }
 
     private static String resourceAttr(Resource resource, String key) {
@@ -602,8 +622,8 @@ public final class JarCollectorService implements ClassFileTransformer {
     }
 
     /**
-     * Reads deployment.environment.name from (in priority order):
-     * system property, env var, then the {@code otel.resource.attributes} bag.
+     * Reads deployment.environment.name from (in priority order): system property, env var, then
+     * the {@code otel.resource.attributes} bag.
      */
     private static String resolveDeploymentEnv() {
       String v = System.getProperty("deployment.environment.name");
@@ -616,16 +636,17 @@ public final class JarCollectorService implements ClassFileTransformer {
       v = System.getenv("DEPLOYMENT_ENVIRONMENT");
       if (v != null && !v.isEmpty()) return v;
       // Last resort: parse otel.resource.attributes
-      return parseResourceAttribute("deployment.environment.name",
-          parseResourceAttribute("deployment.environment", ""));
+      return parseResourceAttribute(
+          "deployment.environment.name", parseResourceAttribute("deployment.environment", ""));
     }
 
     /** Parses a single key from the {@code key1=val1,key2=val2} resource attributes string. */
     private static String parseResourceAttribute(String key, String defaultValue) {
-      String bag = coalesce(
-          System.getProperty("otel.resource.attributes"),
-          System.getenv("OTEL_RESOURCE_ATTRIBUTES"),
-          "");
+      String bag =
+          coalesce(
+              System.getProperty("otel.resource.attributes"),
+              System.getenv("OTEL_RESOURCE_ATTRIBUTES"),
+              "");
       for (String pair : bag.split(",")) {
         int eq = pair.indexOf('=');
         if (eq > 0 && pair.substring(0, eq).trim().equals(key)) {
@@ -655,9 +676,9 @@ public final class JarCollectorService implements ClassFileTransformer {
     }
 
     /**
-     * Reads the EDOT / OTel agent version via reflection on
-     * {@code io.opentelemetry.javaagent.tooling.AgentVersion}, which lives in the agent
-     * classloader at runtime even though it is not a compile-time dependency.
+     * Reads the EDOT / OTel agent version via reflection on {@code
+     * io.opentelemetry.javaagent.tooling.AgentVersion}, which lives in the agent classloader at
+     * runtime even though it is not a compile-time dependency.
      */
     private static String resolveAgentVersion() {
       try {

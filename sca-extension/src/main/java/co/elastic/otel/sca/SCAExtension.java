@@ -33,9 +33,9 @@ import java.util.logging.Logger;
 /**
  * Entry point for the Elastic SCA extension.
  *
- * <p>Registered as both an {@link AutoConfigurationCustomizerProvider} and an {@link
- * AgentListener} via two {@code META-INF/services/} files so that it participates in the OTel
- * autoconfigure lifecycle at the correct phases:
+ * <p>Registered as both an {@link AutoConfigurationCustomizerProvider} and an {@link AgentListener}
+ * via two {@code META-INF/services/} files so that it participates in the OTel autoconfigure
+ * lifecycle at the correct phases:
  *
  * <ol>
  *   <li>{@link #customize} — called <em>before</em> the SDK is built; registers default values for
@@ -45,8 +45,9 @@ import java.util.logging.Logger;
  *       {@link JarCollectorService}.
  * </ol>
  *
- * <p>Following the pattern of {@code inferred-spans} / {@code ElasticAutoConfigurationCustomizerProvider}
- * + {@code ConfigLoggingAgentListener} in the {@code custom} module.
+ * <p>Following the pattern of {@code inferred-spans} / {@code
+ * ElasticAutoConfigurationCustomizerProvider} + {@code ConfigLoggingAgentListener} in the {@code
+ * custom} module.
  */
 public class SCAExtension implements AutoConfigurationCustomizerProvider, AgentListener {
 
@@ -72,13 +73,25 @@ public class SCAExtension implements AutoConfigurationCustomizerProvider, AgentL
     config.addPropertiesCustomizer(
         props -> {
           Map<String, String> defaults = new HashMap<>();
-          setDefault(props, defaults, SCAConfiguration.ENABLED_KEY,
+          setDefault(
+              props,
+              defaults,
+              SCAConfiguration.ENABLED_KEY,
               Boolean.toString(SCAConfiguration.DEFAULT_ENABLED));
-          setDefault(props, defaults, SCAConfiguration.SKIP_TEMP_JARS_KEY,
+          setDefault(
+              props,
+              defaults,
+              SCAConfiguration.SKIP_TEMP_JARS_KEY,
               Boolean.toString(SCAConfiguration.DEFAULT_SKIP_TEMP_JARS));
-          setDefault(props, defaults, SCAConfiguration.JARS_PER_SECOND_KEY,
+          setDefault(
+              props,
+              defaults,
+              SCAConfiguration.JARS_PER_SECOND_KEY,
               Integer.toString(SCAConfiguration.DEFAULT_JARS_PER_SECOND));
-          setDefault(props, defaults, SCAConfiguration.MAX_JARS_TOTAL_KEY,
+          setDefault(
+              props,
+              defaults,
+              SCAConfiguration.MAX_JARS_TOTAL_KEY,
               Integer.toString(SCAConfiguration.DEFAULT_MAX_JARS_TOTAL));
           return defaults;
         });
@@ -125,7 +138,9 @@ public class SCAExtension implements AutoConfigurationCustomizerProvider, AgentL
 
     JarCollectorService service =
         new JarCollectorService(
-            autoConfiguredOpenTelemetrySdk.getOpenTelemetrySdk(), instrumentation, config,
+            autoConfiguredOpenTelemetrySdk.getOpenTelemetrySdk(),
+            instrumentation,
+            config,
             resourceCtx);
     service.start();
   }
@@ -139,20 +154,17 @@ public class SCAExtension implements AutoConfigurationCustomizerProvider, AgentL
    * delegates to bootstrap), we can reach it via {@link Class#forName} without importing it at
    * compile time — and without using {@code ByteBuddyAgent.getInstrumentation()}.
    *
-   * <p>This is the same mechanism used internally by the OTel contrib libraries (e.g.
-   * {@code opentelemetry-javaagent-inferred-spans}) to access the {@link Instrumentation}.
+   * <p>This is the same mechanism used internally by the OTel contrib libraries (e.g. {@code
+   * opentelemetry-javaagent-inferred-spans}) to access the {@link Instrumentation}.
    */
   static Instrumentation findInstrumentation() {
     try {
-      Class<?> holder =
-          Class.forName("io.opentelemetry.javaagent.bootstrap.InstrumentationHolder");
+      Class<?> holder = Class.forName("io.opentelemetry.javaagent.bootstrap.InstrumentationHolder");
       Method getter = holder.getMethod("getInstrumentation");
       return (Instrumentation) getter.invoke(null);
     } catch (Exception e) {
       logger.log(
-          Level.WARNING,
-          "SCA: failed to obtain Instrumentation via InstrumentationHolder",
-          e);
+          Level.WARNING, "SCA: failed to obtain Instrumentation via InstrumentationHolder", e);
       return null;
     }
   }

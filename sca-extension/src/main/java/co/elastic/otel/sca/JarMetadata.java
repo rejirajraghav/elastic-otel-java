@@ -31,8 +31,8 @@ public final class JarMetadata {
   final String groupId;
 
   /**
-   * Package URL in {@code pkg:maven/{groupId}/{artifactId}@{version}} format. Empty if the
-   * artifact name could not be determined.
+   * Package URL in {@code pkg:maven/{groupId}/{artifactId}@{version}} format. Empty if the artifact
+   * name could not be determined.
    */
   final String purl;
 

@@ -1,0 +1,63 @@
+# ============================================================
+# Dockerfile.java-app
+# Spring PetClinic instrumented with the EDOT Java agent
+# (SCA extension baked into the agent)
+#
+# Build context: repo root
+#   docker build -f sca-extension/docker/Dockerfile.java-app \
+#     -t edot-petclinic:latest .
+# ============================================================
+
+# ---- Stage 1: Build Spring PetClinic from source -----------
+FROM maven:3.9-eclipse-temurin-21 AS petclinic-build
+
+WORKDIR /src
+
+RUN git clone --depth 1 \
+      https://github.com/spring-projects/spring-petclinic.git .
+
+RUN mvn package -DskipTests -q
+
+# ---- Stage 2: Runtime image --------------------------------
+FROM eclipse-temurin:21-jre-jammy
+
+LABEL org.opencontainers.image.title="Spring PetClinic + EDOT Java Agent" \
+      org.opencontainers.image.description="Spring Boot demo app instrumented with EDOT Java agent (traces + metrics + logs + SCA extension)"
+
+WORKDIR /app
+
+COPY --from=petclinic-build /src/target/spring-petclinic-*.jar app.jar
+
+# EDOT Java agent JAR (built by: ./gradlew build -x test)
+COPY agent/build/libs/elastic-otel-javaagent-*.jar elastic-otel-javaagent.jar
+
+# Extract the Spring Boot fat JAR so each dependency becomes a real file on disk.
+# Without this, all libs are nested inside app.jar via jar:nested:// protocol and
+# the JVM never exposes them as individual code-source URLs — the SCA extension
+# would only see one JAR (the outer app.jar) instead of ~150 transitive dependencies.
+# -Djarmode=tools is available in Spring Boot 3.3+
+RUN java -Djarmode=tools -jar app.jar extract --destination extracted
+
+EXPOSE 8080
+
+# ---- Required EDOT configuration ---------------------------
+# Three required env vars (override at runtime):
+#   OTEL_SERVICE_NAME               – logical service name
+#   OTEL_EXPORTER_OTLP_ENDPOINT     – EDOT Collector URL (never APM server)
+#   OTEL_EXPORTER_OTLP_HEADERS      – "Authorization=ApiKey <key>"
+#
+# Do NOT set OTEL_TRACES_EXPORTER / OTEL_METRICS_EXPORTER / OTEL_LOGS_EXPORTER
+# — EDOT defaults are already correct (all signals exported via OTLP).
+#
+# SCA extension setting (optional):
+#   ELASTIC_OTEL_SCA_ENABLED        – true | false (default: true)
+
+ENV OTEL_SERVICE_NAME="spring-petclinic" \
+    OTEL_EXPORTER_OTLP_ENDPOINT="http://collector:4318" \
+    ELASTIC_OTEL_SCA_ENABLED="true"
+
+# Attach the EDOT Java agent
+ENV JAVA_TOOL_OPTIONS="-javaagent:/app/elastic-otel-javaagent.jar"
+
+# Run the extracted JAR — Spring Boot uses BOOT-INF/lib/*.jar as real file paths
+CMD ["java", "-jar", "/app/extracted/app.jar"]

@@ -1,0 +1,17 @@
+# ============================================================
+# Dockerfile.collector
+# Elastic Distribution of the OpenTelemetry Collector (EDOT)
+#
+# Uses elastic/elastic-agent with ELASTIC_AGENT_OTEL=true to run
+# in OTel collector mode. This image includes the elasticapm
+# connector and processor which are required for Kibana Service Map,
+# Topology, and APM aggregated metrics — not available in the
+# generic otel/opentelemetry-collector-contrib image.
+# ============================================================
+
+FROM docker.elastic.co/elastic-agent/elastic-agent:9.3.1
+
+COPY otel-collector-config.yaml /etc/otelcol-config.yml
+
+EXPOSE 4317
+EXPOSE 4318

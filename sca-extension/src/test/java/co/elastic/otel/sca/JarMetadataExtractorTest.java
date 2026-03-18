@@ -40,9 +40,12 @@ class JarMetadataExtractorTest {
 
   @Test
   void extractFromPomProperties() throws IOException {
-    File jar = buildJar("my-artifact-1.2.3.jar", jarOut -> {
-      addPomProperties(jarOut, "com.example", "my-artifact", "1.2.3");
-    });
+    File jar =
+        buildJar(
+            "my-artifact-1.2.3.jar",
+            jarOut -> {
+              addPomProperties(jarOut, "com.example", "my-artifact", "1.2.3");
+            });
 
     JarMetadata meta = JarMetadataExtractor.extract(jar.getAbsolutePath(), "testloader");
 
@@ -56,10 +59,13 @@ class JarMetadataExtractorTest {
 
   @Test
   void pomPropertiesTakesPrecedenceOverManifest() throws IOException {
-    File jar = buildJar("artifact.jar", jarOut -> {
-      addPomProperties(jarOut, "com.pom", "pom-artifact", "2.0");
-      addManifest(jarOut, "Manifest-Artifact", "9.9.9", null);
-    });
+    File jar =
+        buildJar(
+            "artifact.jar",
+            jarOut -> {
+              addPomProperties(jarOut, "com.pom", "pom-artifact", "2.0");
+              addManifest(jarOut, "Manifest-Artifact", "9.9.9", null);
+            });
 
     JarMetadata meta = JarMetadataExtractor.extract(jar.getAbsolutePath(), "");
 
@@ -72,9 +78,12 @@ class JarMetadataExtractorTest {
 
   @Test
   void extractFromManifest() throws IOException {
-    File jar = buildJar("manifest-only.jar", jarOut -> {
-      addManifest(jarOut, "My Library", "3.1.0", null);
-    });
+    File jar =
+        buildJar(
+            "manifest-only.jar",
+            jarOut -> {
+              addManifest(jarOut, "My Library", "3.1.0", null);
+            });
 
     JarMetadata meta = JarMetadataExtractor.extract(jar.getAbsolutePath(), "");
 
@@ -86,9 +95,12 @@ class JarMetadataExtractorTest {
 
   @Test
   void manifestSpecificationVersionUsedWhenImplementationVersionAbsent() throws IOException {
-    File jar = buildJar("spec-version.jar", jarOut -> {
-      addManifest(jarOut, "SpecLib", null, "4.0");
-    });
+    File jar =
+        buildJar(
+            "spec-version.jar",
+            jarOut -> {
+              addManifest(jarOut, "SpecLib", null, "4.0");
+            });
 
     JarMetadata meta = JarMetadataExtractor.extract(jar.getAbsolutePath(), "");
 
@@ -100,7 +112,12 @@ class JarMetadataExtractorTest {
 
   @Test
   void extractVersionFromFilename() throws IOException {
-    File jar = buildJar("guava-32.1.3-jre.jar", jarOut -> { /* no metadata */ });
+    File jar =
+        buildJar(
+            "guava-32.1.3-jre.jar",
+            jarOut -> {
+              /* no metadata */
+            });
 
     JarMetadata meta = JarMetadataExtractor.extract(jar.getAbsolutePath(), "");
 
@@ -112,7 +129,12 @@ class JarMetadataExtractorTest {
 
   @Test
   void noVersionInFilename() throws IOException {
-    File jar = buildJar("tools.jar", jarOut -> { /* no metadata */ });
+    File jar =
+        buildJar(
+            "tools.jar",
+            jarOut -> {
+              /* no metadata */
+            });
 
     JarMetadata meta = JarMetadataExtractor.extract(jar.getAbsolutePath(), "");
 
@@ -144,9 +166,12 @@ class JarMetadataExtractorTest {
 
   @Test
   void sha256IsDeterministic() throws IOException {
-    File jar = buildJar("stable.jar", jarOut -> {
-      addPomProperties(jarOut, "org.stable", "stable", "1.0");
-    });
+    File jar =
+        buildJar(
+            "stable.jar",
+            jarOut -> {
+              addPomProperties(jarOut, "org.stable", "stable", "1.0");
+            });
 
     String first = JarMetadataExtractor.computeSha256(jar);
     String second = JarMetadataExtractor.computeSha256(jar);
@@ -199,10 +224,8 @@ class JarMetadataExtractorTest {
   }
 
   private static void addManifest(
-      JarOutputStream jos,
-      String implTitle,
-      String implVersion,
-      String specVersion) throws IOException {
+      JarOutputStream jos, String implTitle, String implVersion, String specVersion)
+      throws IOException {
     Manifest mf = new Manifest();
     Attributes attrs = mf.getMainAttributes();
     attrs.put(Attributes.Name.MANIFEST_VERSION, "1.0");

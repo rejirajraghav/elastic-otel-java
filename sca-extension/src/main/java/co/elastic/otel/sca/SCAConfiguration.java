@@ -22,8 +22,8 @@ package co.elastic.otel.sca;
  * Reads SCA extension configuration from system properties and environment variables.
  *
  * <p>System properties take precedence over environment variables. Default values are also
- * registered in the OTel autoconfigure pipeline by {@link SCAExtension#customize} so they appear
- * in any config-dump tooling that inspects OTel properties.
+ * registered in the OTel autoconfigure pipeline by {@link SCAExtension#customize} so they appear in
+ * any config-dump tooling that inspects OTel properties.
  */
 public final class SCAConfiguration {
 
@@ -49,7 +49,8 @@ public final class SCAConfiguration {
   private final int jarsPerSecond;
   private final int maxJarsTotal;
 
-  private SCAConfiguration(boolean enabled, boolean skipTempJars, int jarsPerSecond, int maxJarsTotal) {
+  private SCAConfiguration(
+      boolean enabled, boolean skipTempJars, int jarsPerSecond, int maxJarsTotal) {
     this.enabled = enabled;
     this.skipTempJars = skipTempJars;
     this.jarsPerSecond = jarsPerSecond;

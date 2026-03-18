@@ -22,6 +22,7 @@ downstream CVE enrichment.
 11. [OTLP → Elasticsearch Data Flow](#11-otlp--elasticsearch-data-flow)
 12. [Performance Characteristics](#12-performance-characteristics)
 13. [Known Limitations and Design Decisions](#13-known-limitations-and-design-decisions)
+14. [Docker Deployment Reference](#14-docker-deployment-reference)
 
 ---
 
@@ -32,7 +33,7 @@ When a Java application runs with the EDOT Java agent:
 1. Every `.jar` file loaded by any classloader is intercepted.
 2. Metadata is extracted from each JAR: `groupId`, `artifactId`, `version`, SHA-256 checksum, pURL.
 3. One OTel log event is emitted per unique JAR path, carrying 25 structured attributes.
-4. Events are sent via OTLP (HTTP/protobuf) to the APM server or directly to Elasticsearch.
+4. Events are sent via OTLP (HTTP/protobuf) to an EDOT Collector, which forwards to Elasticsearch.
 5. Elasticsearch indexes them into the `logs-*` pipeline where they can be queried for CVE matching.
 
 The extension is **observe-only** — it never modifies bytecode, never blocks class loading, and adds
@@ -807,11 +808,28 @@ Libraries packaged without Maven metadata (e.g. hand-rolled JARs, OSGi bundles) 
 empty `library.group_id`. The `library.purl` will omit the namespace component:
 `pkg:maven/commons-codec@1.18.0`. This is valid per the PURL spec.
 
-### Spring Boot executable JARs
+### Spring Boot executable JARs (fat JAR limitation)
 
-Spring Boot's `BOOT-INF/lib/*.jar` entries use the `jar:file:` URL protocol, which
-`locationToJarPath()` handles by stripping the `!/` suffix to obtain the outer JAR path. The
-inner JARs are reported as a single entry for the outer fat JAR.
+Spring Boot packages all dependencies as nested JARs inside a single fat JAR, accessed via the
+`jar:nested://` protocol. When running `java -jar app.jar`, the JVM never exposes nested libraries
+as individual filesystem code-source paths — the SCA extension sees only the outer JAR.
+
+**Fix**: Extract the fat JAR before running so each dependency becomes a real file on disk:
+
+```bash
+# Spring Boot 3.3+
+java -Djarmode=tools -jar app.jar extract --destination extracted
+java -jar extracted/app.jar
+```
+
+In Docker:
+```dockerfile
+COPY app.jar .
+RUN java -Djarmode=tools -jar app.jar extract --destination extracted
+CMD ["java", "-jar", "/app/extracted/app.jar"]
+```
+
+After extraction, Spring PetClinic (~79 JARs) produces ~79 SCA events instead of 1.
 
 ### Agent JAR self-exclusion
 
@@ -839,6 +857,133 @@ events (they are idempotent — the same JARs will be reported on the next resta
 All source code compiles to Java 8 bytecode (`options.release.set(8)`) to support the full range
 of JVM deployments. No Java 9+ APIs are used (no `ProcessHandle.current().pid()`, no `StackWalker`,
 etc.).
+
+---
+
+## 14. Docker Deployment Reference
+
+A production-ready Docker setup lives in `sca-extension/docker/`. It demonstrates the correct
+EDOT architecture: **no APM Server** in the flow.
+
+### Correct EDOT architecture
+
+```
+EDOT Java SDK (spring-petclinic)
+  └─ OTLP/HTTP :4318
+       ▼
+EDOT Collector  (elastic/elastic-agent:9.3.1, ELASTIC_AGENT_OTEL=true)
+  ├─ traces/fromsdk  → [elasticapm processor] → elasticapm connector ─┐
+  │                                           → elasticsearch/otel     │
+  ├─ metrics/fromsdk                          → elasticsearch/otel     │
+  ├─ metrics/aggregated-metrics ←─────────────────────────────────────┘
+  │                                           → elasticsearch/otel
+  └─ logs/fromsdk (app logs + SCA events)    → elasticsearch/otel
+                                                     │
+                                               Elasticsearch
+                                  traces-generic.otel-default   ← Kibana Observability → Services
+                                  metrics-generic.otel-default  ← Kibana Observability → Infrastructure
+                                  logs-generic.otel-default     ← SCA library events + app logs
+```
+
+### Why `elastic/elastic-agent`, not `otel/opentelemetry-collector-contrib`
+
+The `elasticapm` connector and processor are **Elastic extensions** not available in the upstream
+OpenTelemetry Collector contrib image. They are required for:
+
+| Component | Purpose |
+|---|---|
+| `elasticapm` processor | Enriches spans with APM-specific fields needed by Kibana |
+| `elasticapm` connector | Receives traces/logs, generates **aggregated APM metrics** (transaction duration histograms, service throughput, error rates) that power Kibana Service Map and Topology |
+| `metrics/aggregated-metrics` pipeline | Exports those aggregated metrics to Elasticsearch |
+
+Without the `elasticapm` connector, Kibana **Observability → Services** shows no service map or
+topology even though raw spans are present in `traces-generic.otel-default`.
+
+### Why not APM Server?
+
+The APM Server was the classic ingestion path. With EDOT, it is no longer needed:
+
+| | APM Server path (old) | EDOT Collector path (correct) |
+|---|---|---|
+| Trace index | `traces-apm.*` | `traces-generic.otel-*` |
+| Log format | ECS-flattened (`labels.library_*`) | Native OTel (`attributes.library.*`) |
+| `event.name` | Dropped (ECS conflict) | Preserved |
+| Kibana view | APM → Services (legacy) | **Observability → Services** |
+
+### Files
+
+```
+sca-extension/docker/
+├── Dockerfile.java-app          # Spring PetClinic + EDOT Java agent (extracted fat JAR)
+├── Dockerfile.collector         # elastic/elastic-agent:9.3.1 in OTel gateway mode
+├── otel-collector-config.yaml   # Collector config with elasticapm connector
+├── docker-compose.yml           # Orchestrates collector + petclinic + load-generator
+├── .env.example                 # Credential template
+└── .env                         # Credentials (git-ignored)
+```
+
+### Quick start
+
+```bash
+# 1. Build the agent JAR
+./gradlew build -x test
+
+# 2. Fill in credentials
+cp sca-extension/docker/.env.example sca-extension/docker/.env
+# Edit .env: ELASTIC_ENDPOINT and ELASTIC_API_KEY
+
+# 3. Start all services (collector + petclinic + load-generator)
+docker compose -f sca-extension/docker/docker-compose.yml up --build
+
+# 4. Watch load generator produce traces
+docker logs -f edot-load-generator
+```
+
+### Kibana queries after deployment
+
+**Services and topology** (Kibana UI):
+```
+Observability → Services → spring-petclinic
+```
+
+**SCA library inventory** (ES|QL):
+```esql
+FROM logs-generic.otel-default
+| WHERE attributes.`event.name` == "co.elastic.otel.sca.library.loaded"
+| WHERE resource.attributes.`service.name` == "spring-petclinic"
+| KEEP attributes.`library.name`, attributes.`library.version`,
+        attributes.`library.group_id`, attributes.`library.purl`,
+        attributes.`library.sha256`
+| SORT attributes.`library.name` ASC
+| LIMIT 100
+```
+
+**Traces** (ES|QL):
+```esql
+FROM traces-generic.otel-default
+| WHERE resource.attributes.`service.name` == "spring-petclinic"
+| KEEP @timestamp, span.name, attributes.`http.request.method`,
+        attributes.`http.response.status_code`
+| SORT @timestamp DESC
+| LIMIT 20
+```
+
+### Key lessons learned
+
+1. **Fat JAR extraction is mandatory** — Spring Boot nested JARs are invisible to the JVM
+   instrumentation API. Run `java -Djarmode=tools -jar app.jar extract` before starting.
+
+2. **Use `elastic/elastic-agent` image** — The contrib image lacks `elasticapm` connector.
+   Without it the Kibana service map does not render.
+
+3. **EDOT default protocol is `http/protobuf`** — Point `OTEL_EXPORTER_OTLP_ENDPOINT` to port
+   `4318` (HTTP), not `4317` (gRPC), unless you explicitly set `OTEL_EXPORTER_OTLP_PROTOCOL=grpc`.
+
+4. **Do not set `OTEL_TRACES_EXPORTER` / `OTEL_METRICS_EXPORTER` / `OTEL_LOGS_EXPORTER`** —
+   EDOT defaults are already correct. Setting them overrides the defaults unnecessarily.
+
+5. **Observability → Services, not APM → Services** — With EDOT, data lands in
+   `traces-generic.otel-*`. The legacy APM view reads `traces-apm.*` and will appear empty.
 
 ---
 

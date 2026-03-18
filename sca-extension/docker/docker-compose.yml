@@ -1,0 +1,96 @@
+# ============================================================
+# docker-compose.yml
+#
+# Prerequisites:
+#   1. cp sca-extension/docker/.env.example sca-extension/docker/.env
+#      then fill in ELASTIC_ENDPOINT and ELASTIC_API_KEY
+#   2. ./gradlew build -x test  (from repo root, to build the agent JAR)
+#
+# Run (from repo root):
+#   docker compose -f sca-extension/docker/docker-compose.yml up --build
+#
+# Verify SCA events in Kibana (ES|QL):
+#   FROM logs-generic.otel-default
+#   | WHERE attributes.`event.name` == "co.elastic.otel.sca.library.loaded"
+#   | WHERE resource.attributes.`service.name` == "spring-petclinic"
+#   | KEEP attributes.`library.name`, attributes.`library.version`,
+#           attributes.`library.purl`, attributes.`library.sha256`
+#   | SORT attributes.`library.name` ASC
+# ============================================================
+
+services:
+
+  # ---- EDOT Collector (elastic-agent in OTel mode) -----------
+  collector:
+    build:
+      context: sca-extension/docker
+      dockerfile: Dockerfile.collector
+    image: edot-collector:latest
+    container_name: edot-collector
+    restart: unless-stopped
+    # Run elastic-agent in OTel collector mode with our config
+    command: ["--config", "/etc/otelcol-config.yml"]
+    deploy:
+      resources:
+        limits:
+          memory: 1.5G
+    ports:
+      - "4317:4317"    # OTLP gRPC
+      - "4318:4318"    # OTLP HTTP (EDOT Java default)
+    environment:
+      ELASTIC_AGENT_OTEL: "true"       # run elastic-agent in OTel collector mode
+      ELASTIC_ENDPOINT: "${ELASTIC_ENDPOINT}"
+      ELASTIC_API_KEY: "${ELASTIC_API_KEY}"
+      STORAGE_DIR: "/usr/share/elastic-agent"
+    # No healthcheck — elastic-agent image has no curl/wget/ss
+    # petclinic uses service_started + a startup delay instead
+
+  # ---- Load Generator ----------------------------------------
+  # Continuously hits PetClinic endpoints to produce a steady stream
+  # of traces, HTTP spans, and DB spans visible in Kibana Service Map.
+  load-generator:
+    image: alpine:3.19
+    container_name: edot-load-generator
+    restart: unless-stopped
+    depends_on:
+      - petclinic
+    command: >
+      sh -c "
+        echo 'Waiting for PetClinic to start...';
+        sleep 20;
+        echo 'Starting load generation...';
+        while true; do
+          wget -q -O /dev/null http://petclinic:8080/ || true;
+          wget -q -O /dev/null http://petclinic:8080/owners || true;
+          wget -q -O /dev/null 'http://petclinic:8080/owners?lastName=' || true;
+          wget -q -O /dev/null http://petclinic:8080/vets.html || true;
+          wget -q -O /dev/null http://petclinic:8080/owners/new || true;
+          wget -q -O /dev/null 'http://petclinic:8080/owners/1' || true;
+          wget -q -O /dev/null 'http://petclinic:8080/owners/1/pets/new' || true;
+          wget -q -O /dev/null 'http://petclinic:8080/owners/2' || true;
+          sleep 2;
+        done
+      "
+
+  # ---- Spring PetClinic + EDOT Java Agent --------------------
+  petclinic:
+    build:
+      context: .                          # repo root (needs agent JAR)
+      dockerfile: sca-extension/docker/Dockerfile.java-app
+    image: edot-petclinic:latest
+    container_name: edot-petclinic
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    depends_on:
+      - collector
+    environment:
+      # Required EDOT env vars (per EDOT Java setup guide)
+      OTEL_SERVICE_NAME: "spring-petclinic"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://collector:4318"
+      OTEL_RESOURCE_ATTRIBUTES: "deployment.environment=docker-demo,service.version=3.3.0"
+      # SCA extension
+      ELASTIC_OTEL_SCA_ENABLED: "true"
+      ELASTIC_OTEL_SCA_JARS_PER_SECOND: "10"
+      # OTEL_TRACES_EXPORTER / METRICS / LOGS intentionally omitted
+      # EDOT defaults already export all signals via OTLP
