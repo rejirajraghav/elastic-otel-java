@@ -629,6 +629,23 @@ For a typical Spring Boot application with ~150 JARs, complete scanning takes ~1
 startup. Class-loading threads are never affected — they only do a non-blocking `offer()` to the
 queue.
 
+### Stress test: 14 classes → 12 JAR events (expected)
+
+The 14-class stress test produced 12 log events, not 14. This is correct behaviour — the extension
+deduplicates by **JAR path**, not by class. Three of the 14 classes come from the same `guava` JAR:
+
+| Class loaded | JAR | Event emitted? |
+|---|---|---|
+| `ImmutableList` | `guava-33.4.6-jre.jar` | Yes — first class from this JAR |
+| `ImmutableMap` | `guava-33.4.6-jre.jar` | No — JAR already in `seenJarPaths` |
+| `Preconditions` | `guava-33.4.6-jre.jar` | No — JAR already in `seenJarPaths` |
+| `ObjectMapper` | `jackson-databind-2.16.1.jar` | Yes |
+| `JsonFactory` | `jackson-core-2.16.1.jar` | Yes |
+| … 9 more single-class JARs | … | Yes (×9) |
+
+**14 class loads → 12 unique JAR paths → 12 OTel log events.** The two "missing" events are
+guava duplicate class loads — not a detection failure.
+
 ---
 
 ## 13. Known Limitations and Design Decisions
