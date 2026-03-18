@@ -10,17 +10,18 @@ downstream CVE enrichment.
 ## Table of Contents
 
 1. [What It Does](#1-what-it-does)
-2. [Architecture](#2-architecture)
-3. [Module Structure](#3-module-structure)
-4. [Source Files](#4-source-files)
-5. [Configuration Reference](#5-configuration-reference)
-6. [OTel Log Record Schema](#6-otel-log-record-schema)
-7. [Metadata Extraction Priority](#7-metadata-extraction-priority)
-8. [How It Integrates Into the Agent](#8-how-it-integrates-into-the-agent)
-9. [Build and Run](#9-build-and-run)
-10. [OTLP → Elasticsearch Data Flow](#10-otlp--elasticsearch-data-flow)
-11. [Performance Characteristics](#11-performance-characteristics)
-12. [Known Limitations and Design Decisions](#12-known-limitations-and-design-decisions)
+2. [Packaging and Distribution](#2-packaging-and-distribution)
+3. [Architecture](#3-architecture)
+4. [Module Structure](#4-module-structure)
+5. [Source Files](#5-source-files)
+6. [Configuration Reference](#6-configuration-reference)
+7. [OTel Log Record Schema](#7-otel-log-record-schema)
+8. [Metadata Extraction Priority](#8-metadata-extraction-priority)
+9. [How It Integrates Into the Agent](#9-how-it-integrates-into-the-agent)
+10. [Build and Run](#10-build-and-run)
+11. [OTLP → Elasticsearch Data Flow](#11-otlp--elasticsearch-data-flow)
+12. [Performance Characteristics](#12-performance-characteristics)
+13. [Known Limitations and Design Decisions](#13-known-limitations-and-design-decisions)
 
 ---
 
@@ -39,7 +40,92 @@ less than 1 MB of heap overhead.
 
 ---
 
-## 2. Architecture
+## 2. Packaging and Distribution
+
+The `sca-extension` Gradle module is a library that is **not distributed standalone**. It is wired
+into the `custom` module and from there flows into two distributable artifacts:
+
+```
+sca-extension  (library module)
+      │
+      └──► custom/build.gradle.kts
+                 implementation(project(":sca-extension"))
+                      │
+              ┌───────┴────────────────────────┐
+              ▼                                ▼
+   elastic-otel-javaagent.jar      elastic-otel-agentextension.jar
+   (EDOT full agent)               (extension-only JAR for vanilla OTel agent)
+```
+
+### Distribution mode 1 — EDOT full agent (current default)
+
+SCA classes are shaded and **baked directly into** `elastic-otel-javaagent.jar` under the `inst/`
+prefix (the agent's instrumentation classloader). Confirmed by inspecting the JAR:
+
+```
+inst/co/elastic/otel/sca/JarCollectorService.classdata
+inst/co/elastic/otel/sca/JarMetadataExtractor.classdata
+inst/co/elastic/otel/sca/SCAExtension.classdata
+...
+```
+
+**Usage** — single JAR, nothing extra required:
+
+```bash
+java -javaagent:elastic-otel-javaagent-<VERSION>.jar \
+     -Dotel.service.name=my-service \
+     -jar my-app.jar
+```
+
+### Distribution mode 2 — standalone extension for the vanilla OTel agent
+
+The `agentextension` module shadows the `custom` module (which includes `sca-extension`) into a
+separate fat JAR: `elastic-otel-agentextension.jar`. This is intended for teams already running
+the **upstream OpenTelemetry Java agent** who want Elastic extensions (including SCA) without
+switching to the full EDOT agent.
+
+```
+agentextension/build.gradle.kts:
+  shadowDependencies(project(":custom"))   ← custom already includes sca-extension
+```
+
+**Usage** — two JARs loaded together:
+
+```bash
+java -javaagent:opentelemetry-javaagent-<VERSION>.jar \
+     -Dotel.javaagent.extensions=elastic-otel-agentextension-<VERSION>.jar \
+     -Dotel.service.name=my-service \
+     -jar my-app.jar
+```
+
+### Summary
+
+| Artifact | Contains SCA? | Use case |
+|---|---|---|
+| `elastic-otel-javaagent.jar` | Yes — baked in via `custom` | Default EDOT deployment |
+| `elastic-otel-agentextension.jar` | Yes — shaded in via `custom` | Add Elastic extensions to vanilla OTel agent |
+| `elastic-otel-sca-extension.jar` | N/A — does not exist yet | Future: standalone SCA-only extension |
+
+### Alternative: fully standalone SCA extension (not yet implemented)
+
+If you want to deploy SCA independently — for example, to add it to an existing EDOT deployment
+without rebuilding the agent — you would:
+
+1. Remove `implementation(project(":sca-extension"))` from `custom/build.gradle.kts`.
+2. Build `sca-extension` as its own shadow JAR with all OTel dependencies as `compileOnly`.
+3. Deploy as:
+
+```bash
+java -javaagent:elastic-otel-javaagent-<VERSION>.jar \
+     -Dotel.javaagent.extensions=elastic-otel-sca-extension-<VERSION>.jar \
+     -jar my-app.jar
+```
+
+This gives teams the flexibility to upgrade the SCA extension independently of the base agent.
+
+---
+
+## 3. Architecture
 
 ```
 JVM class loading event
@@ -89,7 +175,7 @@ APM Server → Elasticsearch → logs-* data stream
 
 ---
 
-## 3. Module Structure
+## 4. Module Structure
 
 ```
 sca-extension/
@@ -124,7 +210,7 @@ include("sca-extension")
 
 ---
 
-## 4. Source Files
+## 5. Source Files
 
 ### `SCAExtension.java`
 
@@ -197,7 +283,7 @@ Immutable value object holding: `name`, `version`, `groupId`, `purl`, `jarPath`,
 
 ---
 
-## 5. Configuration Reference
+## 6. Configuration Reference
 
 ### Enabling / disabling
 
@@ -249,7 +335,7 @@ java \
 
 ---
 
-## 6. OTel Log Record Schema
+## 7. OTel Log Record Schema
 
 Every JAR emits exactly one `LogRecord` in instrumentation scope `co.elastic.otel.sca` with schema
 URL `https://opentelemetry.io/schemas/1.21.0`.
@@ -304,7 +390,7 @@ Format: `JAR loaded: <groupId>:<artifactId>:<version> path=<jarPath>`
 
 ---
 
-## 7. Metadata Extraction Priority
+## 8. Metadata Extraction Priority
 
 ```
 JAR file
@@ -330,7 +416,7 @@ The pURL is only built when `artifactId` is non-empty:
 
 ---
 
-## 8. How It Integrates Into the Agent
+## 9. How It Integrates Into the Agent
 
 The extension participates in the OTel Java agent's autoconfigure lifecycle:
 
@@ -396,7 +482,7 @@ This avoids a compile-time dependency on agent-internal classes.
 
 ---
 
-## 9. Build and Run
+## 10. Build and Run
 
 ### Build the agent JAR
 
@@ -453,7 +539,7 @@ The APM endpoint and bearer token are available in Kibana under:
 
 ---
 
-## 10. OTLP → Elasticsearch Data Flow
+## 11. OTLP → Elasticsearch Data Flow
 
 ```
 Java app with EDOT agent
@@ -511,7 +597,7 @@ FROM logs-*
 
 ---
 
-## 11. Performance Characteristics
+## 12. Performance Characteristics
 
 Benchmarks run against `elastic-otel-javaagent-1.9.1-SNAPSHOT.jar` (31 MB), Java 25, Apple
 Silicon M-series, measuring the impact of the SCA extension on a real application workload.
@@ -545,7 +631,7 @@ queue.
 
 ---
 
-## 12. Known Limitations and Design Decisions
+## 13. Known Limitations and Design Decisions
 
 ### JARs without pom.properties
 
