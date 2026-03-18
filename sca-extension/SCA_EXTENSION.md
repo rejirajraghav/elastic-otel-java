@@ -127,11 +127,12 @@ OTLP HTTP/protobuf exporter (:4318)
         ▼
 EDOT Collector → Elasticsearch → logs-generic.otel-default
 
-Additional discovery paths (run at startup and on re-harvest schedule):
-  ┌─ Startup classpath scan ──── java.class.path + ManagementFactory classpath
-  ├─ URLClassLoader.getURLs() ── discovers Spring Boot BOOT-INF/lib/ nested JARs
-  ├─ Class-Path manifest follow ─ MANIFEST.MF Class-Path entries (1 level deep)
-  └─ JPMS module layer scan ──── ModuleLayer.boot() for Java 9+ named modules
+Additional discovery paths:
+  ┌─ Startup classpath scan ──── java.class.path + ManagementFactory classpath  (at startup)
+  ├─ JPMS module layer scan ──── ModuleLayer.boot() for Java 9+ named modules   (at startup)
+  ├─ URLClassLoader.getURLs() ── discovers Spring Boot BOOT-INF/lib/ nested JARs (per class load + re-harvest)
+  ├─ Class-Path manifest follow ─ MANIFEST.MF Class-Path entries (1 level deep)  (inline, per JAR processed)
+  └─ Periodic re-harvest ──────── rescans seenClassLoaders + startup classpath   (every N seconds)
 ```
 
 **Key design constraints:**
@@ -230,21 +231,26 @@ Core service. Implements `ClassFileTransformer`. Contains:
 
 - **`ResourceContext`** — pre-extracts all context identical for every log record (service name,
   host, PID, agent version, container/k8s fields). Built once at startup.
-- **`transform()`** — observe-only. Extracts JAR path from `ProtectionDomain`, applies skip filters
-  (`skipTempJars`, `skipTestJars`, agent self-exclusion), deduplicates, offers to bounded queue.
+- **`transform()`** — observe-only. Extracts JAR path from `ProtectionDomain`, applies skip filters,
+  deduplicates, offers to bounded queue. Skip rules:
+  - **Always hardcoded**: agent JAR self-exclusion (`elastic-otel-javaagent`, `opentelemetry-javaagent`),
+    `-sources.jar`, `-javadoc.jar`, `-sources-tests.jar`, Gradle daemon/wrapper dirs, Maven wrapper dirs
+  - **Config-driven**: test JARs (`skipTestJars`), temp directories (`skipTempJars`)
 - **`scanStartupClasspath()`** — scans `java.class.path` system property and
   `ManagementFactory.getRuntimeMXBean().getClassPath()` before the transformer registers.
 - **`scanModuleLayer()`** — scans `ModuleLayer.boot()` to discover JPMS named modules; emits with
   `library.module_type=jpms-module`.
 - **`scanAlreadyLoadedClasses()`** — back-fills already-loaded classes via
   `Instrumentation.getAllLoadedClasses()`.
-- **`scanUrlClassLoaders()`** — scans all known `URLClassLoader` instances for URLs not yet seen,
-  including `jar:nested:` Spring Boot URLs.
-- **`followManifestClasspath()`** — opens each seen JAR, reads `MANIFEST.MF Class-Path`, enqueues
-  referenced JARs one level deep.
+- **`enqueueClassLoaderUrls(URLClassLoader)`** — scans a single `URLClassLoader` for URLs not yet
+  seen, including `jar:nested:` Spring Boot URLs. Called per discovered classloader and during re-harvest.
+- **`followClassPathEntries(String jarPath)`** — opens a JAR, reads `MANIFEST.MF Class-Path`, and
+  enqueues referenced JARs one level deep. Called from `processJar()` inline after emitting each event
+  (not during re-harvest).
 - **`startReharvest(int intervalSeconds)`** — creates a single-thread `ScheduledExecutorService`
-  (daemon) that calls `scanUrlClassLoaders()` + `followManifestClasspath()` on the configured
-  interval. Ignored when `intervalSeconds == 0`.
+  (daemon). On each tick, iterates `seenClassLoaders` calling `enqueueClassLoaderUrls()` for any new
+  URLs, then conditionally re-runs `scanStartupClasspath()`. Does **not** follow Class-Path manifests
+  (that happens inline per JAR). Ignored when `intervalSeconds == 0`.
 - **`processQueue()`** — background daemon thread loop. Applies rate limiter, calls
   `JarMetadataExtractor.extract()` or `extractFromUrl()` as appropriate, calls `emitLogRecord()`.
 - **`emitLogRecord()`** — builds OTel `LogRecord` with all attributes and correct wall-clock
@@ -309,7 +315,7 @@ take precedence.
 | `elastic.otel.sca.jars_per_second` | `ELASTIC_OTEL_SCA_JARS_PER_SECOND` | `10` | Maximum JAR events emitted per second (token-bucket rate limiter) |
 | `elastic.otel.sca.max_jars_total` | `ELASTIC_OTEL_SCA_MAX_JARS_TOTAL` | `5000` | Hard cap: stop processing new JARs after this many unique paths per JVM lifetime |
 | `elastic.otel.sca.skip_temp_jars` | `ELASTIC_OTEL_SCA_SKIP_TEMP_JARS` | `true` | Skip JARs under `java.io.tmpdir` (e.g. JRuby, Groovy bytecode JARs, Spring Boot temp extract) |
-| `elastic.otel.sca.skip_test_jars` | `ELASTIC_OTEL_SCA_SKIP_TEST_JARS` | `true` | Skip `*-tests.jar`, `*-test.jar`, `*-test-*.jar` — no executable library code |
+| `elastic.otel.sca.skip_test_jars` | `ELASTIC_OTEL_SCA_SKIP_TEST_JARS` | `true` | Skip `*-tests.jar` and `*-test.jar` — no executable library code. Note: `-sources.jar` and `-javadoc.jar` are always skipped regardless of this setting |
 | `elastic.otel.sca.scan_startup_classpath` | `ELASTIC_OTEL_SCA_SCAN_STARTUP_CLASSPATH` | `true` | Eagerly scan `java.class.path` and ManagementFactory classpath before the ClassFileTransformer registers |
 | `elastic.otel.sca.follow_manifest_classpath` | `ELASTIC_OTEL_SCA_FOLLOW_MANIFEST_CLASSPATH` | `true` | Follow `Class-Path` entries in each JAR's `MANIFEST.MF` one level deep |
 | `elastic.otel.sca.detect_shaded_jars` | `ELASTIC_OTEL_SCA_DETECT_SHADED_JARS` | `true` | When a JAR contains multiple `pom.properties`, emit one event per embedded library (`library.shaded=true`) |
@@ -373,6 +379,7 @@ Format: `JAR loaded: <groupId>:<artifactId>:<version> path=<jarPath>`
 | `library.sha1` | `d4e5f678...` | SHA-1 hex digest (40 chars) — for Maven Central matching |
 | `library.checksum.sha1` | `d4e5f678...` | Same SHA-1 (OTel semconv duplicate) |
 | `library.module_type` | `jar` | How the library was discovered (see below) |
+| `library.shaded` | `false` / `true` | Always emitted. `true` for `shaded-entry` entries, `false` for all others |
 | `library.classloader` | `jdk.internal.loader.ClassLoaders$AppClassLoader` | Classloader that loaded the JAR |
 
 #### `library.module_type` values
@@ -384,12 +391,11 @@ Format: `JAR loaded: <groupId>:<artifactId>:<version> path=<jarPath>`
 | `shaded-entry` | Library embedded inside a shaded/uber-JAR (multiple pom.properties) |
 | `jpms-module` | Named module from the Java 9+ module layer (JPMS) |
 
-#### Conditionally emitted library attributes
+#### Conditionally emitted library attribute
 
 | Attribute | Type | When present |
 |---|---|---|
-| `library.shaded` | boolean | `true` only for `shaded-entry` entries |
-| `library.license` | string | SPDX identifier (e.g. `Apache-2.0`) — only when detected from Bundle-License or LICENSE file |
+| `library.license` | string | SPDX identifier (e.g. `Apache-2.0`) — only when detected from Bundle-License or LICENSE file. Omitted when not determinable |
 
 #### Event identity attributes
 
@@ -551,10 +557,14 @@ AgentListener.afterAgent()                             ← SCAExtension.afterAge
     ▼
 Application runs
     │   Every class load → transform() → enqueue JAR path
-    │   Every N seconds  → rescan URLClassLoaders + follow manifest Class-Path
+    │                                  → if new URLClassLoader, scan its URLs
+    │   Every N seconds (re-harvest) → re-scan seenClassLoaders for new URLs
+    │                                → re-run scanStartupClasspath()
     │
     ▼
 Background thread drains queue → extract metadata → emit OTel LogRecord
+    │                          → inline: followClassPathEntries() per JAR
+    │                            (follows MANIFEST Class-Path one level deep)
     │
     ▼
 BatchLogRecordProcessor → OTLP HTTP exporter → EDOT Collector → Elasticsearch

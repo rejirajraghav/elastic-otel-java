@@ -81,7 +81,7 @@ System properties take precedence.
 | `elastic.otel.sca.jars_per_second` | `ELASTIC_OTEL_SCA_JARS_PER_SECOND` | `10` | Maximum JAR events emitted per second |
 | `elastic.otel.sca.max_jars_total` | `ELASTIC_OTEL_SCA_MAX_JARS_TOTAL` | `5000` | Hard cap on total unique JARs per JVM lifetime |
 | `elastic.otel.sca.skip_temp_jars` | `ELASTIC_OTEL_SCA_SKIP_TEMP_JARS` | `true` | Skip JARs under `java.io.tmpdir` |
-| `elastic.otel.sca.skip_test_jars` | `ELASTIC_OTEL_SCA_SKIP_TEST_JARS` | `true` | Skip `*-tests.jar`, `*-test.jar`, `*-test-*.jar` |
+| `elastic.otel.sca.skip_test_jars` | `ELASTIC_OTEL_SCA_SKIP_TEST_JARS` | `true` | Skip `*-tests.jar` and `*-test.jar`. Note: `-sources.jar` and `-javadoc.jar` are always skipped |
 | `elastic.otel.sca.scan_startup_classpath` | `ELASTIC_OTEL_SCA_SCAN_STARTUP_CLASSPATH` | `true` | Eagerly scan `java.class.path` and ManagementFactory classpath at startup |
 | `elastic.otel.sca.follow_manifest_classpath` | `ELASTIC_OTEL_SCA_FOLLOW_MANIFEST_CLASSPATH` | `true` | Follow `Class-Path` entries in `MANIFEST.MF` one level deep |
 | `elastic.otel.sca.detect_shaded_jars` | `ELASTIC_OTEL_SCA_DETECT_SHADED_JARS` | `true` | Detect shaded/uber-JARs and emit one event per embedded library |
