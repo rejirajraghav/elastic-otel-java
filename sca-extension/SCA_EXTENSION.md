@@ -596,13 +596,16 @@ underscores). For a service named `sca-phase2-test` it is `logs-apm.app.sca_phas
 
 ### Querying in Kibana with ES|QL
 
-**Important:** Use `labels.event_action == "library-loaded"` (not `event.name`) to identify SCA
-records, and `labels.library_*` for library fields (not `library.*`).
+**Important:** `library.*` and `event.*` SCA attributes are stored under `labels.*` with dots
+replaced by underscores. The cleanest filter for SCA events is `service.framework.name`, which
+is a top-level ECS field set to `co.elastic.otel.sca` on every library event (the OTel
+instrumentation scope name). This is the recommended filter — more reliable than `labels.event_action`
+which sits under the flattened labels object.
 
 All libraries loaded by a service:
 ```esql
 FROM logs-apm.app.*
-| WHERE labels.event_action == "library-loaded"
+| WHERE service.framework.name == "co.elastic.otel.sca"
 | WHERE service.name == "my-service"
 | KEEP labels.library_name, labels.library_version, labels.library_group_id,
         labels.library_purl, labels.library_sha256, labels.library_id
@@ -613,7 +616,7 @@ FROM logs-apm.app.*
 Library inventory across all services (production):
 ```esql
 FROM logs-apm.app.*
-| WHERE labels.event_action == "library-loaded"
+| WHERE service.framework.name == "co.elastic.otel.sca"
 | WHERE labels.deployment_environment_name == "production"
 | STATS services = COUNT_DISTINCT(service.name) BY labels.library_id, labels.library_purl
 | SORT services DESC
@@ -622,20 +625,55 @@ FROM logs-apm.app.*
 Find a specific library by SHA-256 (for CVE investigation):
 ```esql
 FROM logs-apm.app.*
-| WHERE labels.event_action == "library-loaded"
+| WHERE service.framework.name == "co.elastic.otel.sca"
 | WHERE labels.library_sha256 == "958a035b74ff6c7d0cdff9c384524b645eb618f7117b60e1ee915f9cffd0e716"
 | KEEP service.name, labels.library_name, labels.library_version,
         labels.library_path, labels.agent_ephemeral_id
 ```
 
-Alternative — filter by message body (more portable, works regardless of field mapping):
+Find all services running a specific library version (e.g. for CVE blast radius):
 ```esql
 FROM logs-apm.app.*
-| WHERE message LIKE "JAR loaded%"
-| KEEP message, labels.library_name, labels.library_version,
-        labels.library_purl, labels.library_id, service.name
-| SORT labels.library_name ASC
-| LIMIT 50
+| WHERE service.framework.name == "co.elastic.otel.sca"
+| WHERE labels.library_name == "guava" AND labels.library_version == "33.4.6-jre"
+| STATS instances = COUNT(*) BY service.name
+| SORT instances DESC
+```
+
+### Live-validated document structure (APM server 9.3.1)
+
+A confirmed real document from the pipeline (`slf4j-api` event, tested 2026-03-18):
+
+```json
+{
+  "service.framework.name": "co.elastic.otel.sca",
+  "service.framework.version": "1.9.1-SNAPSHOT",
+  "service.name": "sca-phase2-test",
+  "message": "JAR loaded: org.slf4j:slf4j-api:2.0.17 path=.../slf4j-api-2.0.17.jar",
+  "labels": {
+    "library_name": "slf4j-api",
+    "library_version": "2.0.17",
+    "library_group_id": "org.slf4j",
+    "library_id": "org.slf4j:slf4j-api:2.0.17",
+    "library_purl": "pkg:maven/org.slf4j/slf4j-api@2.0.17",
+    "library_sha256": "7b751d952061954d5abfed7181c1f645d336091b679891591d63329c622eb832",
+    "library_checksum_sha256": "7b751d952061954d5abfed7181c1f645d336091b679891591d63329c622eb832",
+    "library_type": "jar",
+    "library_language": "java",
+    "library_path": ".../slf4j-api-2.0.17.jar",
+    "library_classloader": "jdk.internal.loader.ClassLoaders$AppClassLoader",
+    "event_action": "library-loaded",
+    "agent_name": "elastic-otel-java",
+    "agent_type": "opentelemetry",
+    "agent_version": "1.9.1-SNAPSHOT",
+    "agent_ephemeral_id": "478f6fe3-7db1-41f3-95dd-1223297ba027",
+    "service_name": "sca-phase2-test",
+    "host_name": "Rajirajs-MacBook",
+    "process_pid": "20748",
+    "process_runtime_name": "OpenJDK Runtime Environment",
+    "process_runtime_version": "25"
+  }
+}
 ```
 
 ---
