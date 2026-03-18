@@ -563,36 +563,79 @@ https://<apm-id>.apm.<region>.gcp.elastic-cloud.com:443
 The OTel SDK appends `/v1/logs` automatically when `otel.exporter.otlp.protocol=http/protobuf`
 is set and `otel.logs.exporter=otlp`.
 
-**Note on ECS mapping:** Elastic's OTLP ingest pipeline translates OTel attribute names to ECS
-field names automatically. Do not use ECS field names in application code — always use the OTel
-semantic convention names (e.g. `service.name` not `service_name`).
+### APM server ECS field mapping
+
+The APM server maps OTel log record attributes to ECS. Fields with known ECS equivalents (e.g.
+`service.name`, `host.name`, `process.pid`) are stored at their natural ECS paths. All other
+custom attributes — including all `library.*`, `agent.*`, and `event.*` SCA fields — are stored
+flat under the `labels` object with **dots replaced by underscores**:
+
+| OTel attribute emitted by SCA | Stored in Elasticsearch as |
+|---|---|
+| `library.name` | `labels.library_name` |
+| `library.version` | `labels.library_version` |
+| `library.group_id` | `labels.library_group_id` |
+| `library.id` | `labels.library_id` |
+| `library.purl` | `labels.library_purl` |
+| `library.sha256` | `labels.library_sha256` |
+| `library.checksum.sha256` | `labels.library_checksum_sha256` |
+| `library.path` | `labels.library_path` |
+| `library.type` | `labels.library_type` |
+| `library.language` | `labels.library_language` |
+| `library.classloader` | `labels.library_classloader` |
+| `event.name` | *(dropped — conflicts with reserved ECS `event` object)* |
+| `event.action` | `labels.event_action` |
+| `event.domain` | `labels.event_domain` |
+| `agent.ephemeral_id` | `labels.agent_ephemeral_id` |
+| `service.name` | `service.name` *(native ECS — top-level)* |
+| `host.name` | `host.name` *(native ECS — top-level)* |
+| `process.pid` | `process.pid` *(native ECS — top-level)* |
+
+The data stream is `logs-apm.app.<service-name>-default` (hyphens in service name become
+underscores). For a service named `sca-phase2-test` it is `logs-apm.app.sca_phase2_test-default`.
 
 ### Querying in Kibana with ES|QL
 
+**Important:** Use `labels.event_action == "library-loaded"` (not `event.name`) to identify SCA
+records, and `labels.library_*` for library fields (not `library.*`).
+
 All libraries loaded by a service:
 ```esql
-FROM logs-*
-| WHERE event.name == "co.elastic.otel.sca.library.loaded"
+FROM logs-apm.app.*
+| WHERE labels.event_action == "library-loaded"
 | WHERE service.name == "my-service"
-| KEEP library.name, library.version, library.group_id, library.purl, library.sha256
-| SORT library.name ASC
+| KEEP labels.library_name, labels.library_version, labels.library_group_id,
+        labels.library_purl, labels.library_sha256, labels.library_id
+| SORT labels.library_name ASC
+| LIMIT 50
 ```
 
 Library inventory across all services (production):
 ```esql
-FROM logs-*
-| WHERE event.name == "co.elastic.otel.sca.library.loaded"
-| WHERE deployment.environment.name == "production"
-| STATS services = COUNT_DISTINCT(service.name) BY library.id, library.purl
+FROM logs-apm.app.*
+| WHERE labels.event_action == "library-loaded"
+| WHERE labels.deployment_environment_name == "production"
+| STATS services = COUNT_DISTINCT(service.name) BY labels.library_id, labels.library_purl
 | SORT services DESC
 ```
 
 Find a specific library by SHA-256 (for CVE investigation):
 ```esql
-FROM logs-*
-| WHERE event.name == "co.elastic.otel.sca.library.loaded"
-| WHERE library.sha256 == "958a035b74ff6c7d0cdff9c384524b645eb618f7117b60e1ee915f9cffd0e716"
-| KEEP service.name, library.name, library.version, library.path, agent.ephemeral_id
+FROM logs-apm.app.*
+| WHERE labels.event_action == "library-loaded"
+| WHERE labels.library_sha256 == "958a035b74ff6c7d0cdff9c384524b645eb618f7117b60e1ee915f9cffd0e716"
+| KEEP service.name, labels.library_name, labels.library_version,
+        labels.library_path, labels.agent_ephemeral_id
+```
+
+Alternative — filter by message body (more portable, works regardless of field mapping):
+```esql
+FROM logs-apm.app.*
+| WHERE message LIKE "JAR loaded%"
+| KEEP message, labels.library_name, labels.library_version,
+        labels.library_purl, labels.library_id, service.name
+| SORT labels.library_name ASC
+| LIMIT 50
 ```
 
 ---
