@@ -71,6 +71,8 @@ public class SCAExtension implements AutoConfigurationCustomizerProvider, AgentL
               Boolean.toString(SCAConfiguration.DEFAULT_SKIP_TEMP_JARS));
           setDefault(props, defaults, SCAConfiguration.JARS_PER_SECOND_KEY,
               Integer.toString(SCAConfiguration.DEFAULT_JARS_PER_SECOND));
+          setDefault(props, defaults, SCAConfiguration.MAX_JARS_TOTAL_KEY,
+              Integer.toString(SCAConfiguration.DEFAULT_MAX_JARS_TOTAL));
           return defaults;
         });
   }

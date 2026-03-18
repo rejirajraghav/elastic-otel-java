@@ -34,6 +34,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Level;
 
 /**
@@ -88,6 +89,9 @@ public final class JarCollectorService implements ClassFileTransformer {
 
   /** Paths already enqueued or processed — prevents duplicate work. */
   private final Set<String> seenJarPaths = ConcurrentHashMap.newKeySet();
+
+  /** Total number of JARs admitted (enqueued or processed). Capped at maxJarsTotal. */
+  private final AtomicInteger totalJarsAdmitted = new AtomicInteger(0);
 
   /**
    * Bounded queue of JARs waiting for metadata extraction. Offer is non-blocking; full queue drops
@@ -192,15 +196,21 @@ public final class JarCollectorService implements ClassFileTransformer {
     if (shouldSkip(jarPath)) {
       return;
     }
+    // Cap total JARs to prevent unbounded seenJarPaths growth in long-running apps
+    if (totalJarsAdmitted.get() >= config.getMaxJarsTotal()) {
+      return;
+    }
     if (!seenJarPaths.add(jarPath)) {
       return; // already seen
     }
+    totalJarsAdmitted.incrementAndGet();
 
     String classloaderName = loader.getClass().getName();
     // Non-blocking offer: if the queue is full we drop this JAR rather than stall a class-loading
     // thread. Remove from seen-set so a future class load from the same JAR gets another chance.
     if (!pendingJars.offer(new PendingJar(jarPath, classloaderName))) {
       seenJarPaths.remove(jarPath);
+      totalJarsAdmitted.decrementAndGet();
       log.fine("SCA: queue full, dropping JAR (will retry on next class load): " + jarPath);
     }
   }
@@ -311,6 +321,7 @@ public final class JarCollectorService implements ClassFileTransformer {
 
     otelLogger
         .logRecordBuilder()
+        .setTimestamp(System.currentTimeMillis(), TimeUnit.MILLISECONDS)
         .setBody(body)
         .setAllAttributes(
             Attributes.builder()

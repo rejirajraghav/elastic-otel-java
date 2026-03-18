@@ -36,18 +36,24 @@ public final class SCAConfiguration {
   static final String JARS_PER_SECOND_KEY = "elastic.otel.sca.jars_per_second";
   static final String JARS_PER_SECOND_ENV = "ELASTIC_OTEL_SCA_JARS_PER_SECOND";
 
+  static final String MAX_JARS_TOTAL_KEY = "elastic.otel.sca.max_jars_total";
+  static final String MAX_JARS_TOTAL_ENV = "ELASTIC_OTEL_SCA_MAX_JARS_TOTAL";
+
   static final boolean DEFAULT_ENABLED = true;
   static final boolean DEFAULT_SKIP_TEMP_JARS = true;
   static final int DEFAULT_JARS_PER_SECOND = 10;
+  static final int DEFAULT_MAX_JARS_TOTAL = 5000;
 
   private final boolean enabled;
   private final boolean skipTempJars;
   private final int jarsPerSecond;
+  private final int maxJarsTotal;
 
-  private SCAConfiguration(boolean enabled, boolean skipTempJars, int jarsPerSecond) {
+  private SCAConfiguration(boolean enabled, boolean skipTempJars, int jarsPerSecond, int maxJarsTotal) {
     this.enabled = enabled;
     this.skipTempJars = skipTempJars;
     this.jarsPerSecond = jarsPerSecond;
+    this.maxJarsTotal = maxJarsTotal;
   }
 
   /** Reads current configuration from system properties and environment variables. */
@@ -55,7 +61,8 @@ public final class SCAConfiguration {
     return new SCAConfiguration(
         readBoolean(ENABLED_KEY, ENABLED_ENV, DEFAULT_ENABLED),
         readBoolean(SKIP_TEMP_JARS_KEY, SKIP_TEMP_JARS_ENV, DEFAULT_SKIP_TEMP_JARS),
-        readInt(JARS_PER_SECOND_KEY, JARS_PER_SECOND_ENV, DEFAULT_JARS_PER_SECOND));
+        readInt(JARS_PER_SECOND_KEY, JARS_PER_SECOND_ENV, DEFAULT_JARS_PER_SECOND),
+        readInt(MAX_JARS_TOTAL_KEY, MAX_JARS_TOTAL_ENV, DEFAULT_MAX_JARS_TOTAL));
   }
 
   public boolean isEnabled() {
@@ -68,6 +75,10 @@ public final class SCAConfiguration {
 
   public int getJarsPerSecond() {
     return jarsPerSecond;
+  }
+
+  public int getMaxJarsTotal() {
+    return maxJarsTotal;
   }
 
   private static boolean readBoolean(String sysProp, String envVar, boolean defaultValue) {
