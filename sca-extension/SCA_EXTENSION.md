@@ -541,27 +541,69 @@ The APM endpoint and bearer token are available in Kibana under:
 
 ## 11. OTLP → Elasticsearch Data Flow
 
+There are **two distinct ingestion paths**, each producing a different index pattern and field
+structure. Which one you use determines how to write your ES|QL queries.
+
+---
+
+### Path A — Direct to APM Server (standalone Java agent, no Kubernetes collector)
+
 ```
-Java app with EDOT agent
+Java app + EDOT agent
         │ OTLP HTTP/protobuf  POST /v1/logs
         ▼
-APM Server (Elastic Cloud)
-        │ parses OTLP LogRecord
-        │ maps attributes to ECS fields automatically
+APM Server  (https://<id>.apm.<region>.gcp.elastic-cloud.com:443)
+        │ ECS mapping: custom OTel attributes → labels.* (dots → underscores)
+        │ event.name dropped (conflicts with reserved ECS event object)
         ▼
-Elasticsearch  →  logs-* data stream
-        │
-        ▼
-Kibana → Discover / Lens / Alerting for CVE matching
-```
-
-The APM server endpoint is at:
-```
-https://<apm-id>.apm.<region>.gcp.elastic-cloud.com:443
+logs-apm.app.<service_name>-default
 ```
 
 The OTel SDK appends `/v1/logs` automatically when `otel.exporter.otlp.protocol=http/protobuf`
-is set and `otel.logs.exporter=otlp`.
+is set and `otel.logs.exporter=otlp`. The APM endpoint and Bearer token are found in Kibana under
+**APM → Add data → OpenTelemetry → Configure OpenTelemetry in your application**.
+
+---
+
+### Path B — Via EDOT Collector / kube-stack (Kubernetes deployments)
+
+```
+Java app + EDOT agent
+        │ OTLP gRPC  → daemon collector (port 4317)
+        ▼
+EDOT Collector (opentelemetry-kube-stack)
+        │ elasticsearch/otel exporter
+        │ Native OTel data model — NO ECS flattening
+        │ Attributes preserved as attributes.* and resource.attributes.*
+        ▼
+logs-generic.otel-default
+```
+
+This path is used when the kube-stack Helm chart is deployed. The collector receives OTLP from
+the agent and forwards to Elasticsearch using the `elasticsearch/otel` exporter, which writes the
+native OpenTelemetry data model without ECS transformation.
+
+**This is the recommended path for Kubernetes deployments** — all fields are preserved exactly
+as emitted, including `event.name`.
+
+---
+
+### Field mapping comparison
+
+| OTel attribute | Path A (APM Server) | Path B (EDOT Collector) |
+|---|---|---|
+| `library.name` | `labels.library_name` | `attributes.library.name` |
+| `library.version` | `labels.library_version` | `attributes.library.version` |
+| `library.group_id` | `labels.library_group_id` | `attributes.library.group_id` |
+| `library.id` | `labels.library_id` | `attributes.library.id` |
+| `library.purl` | `labels.library_purl` | `attributes.library.purl` |
+| `library.sha256` | `labels.library_sha256` | `attributes.library.sha256` |
+| `event.name` | **dropped** (ECS conflict) | `attributes.event.name` ✓ |
+| `event.action` | `labels.event_action` | `attributes.event.action` |
+| `service.name` | `service.name` (top-level ECS) | `resource.attributes.service.name` |
+| `host.name` | `host.name` (top-level ECS) | `resource.attributes.host.name` |
+| `k8s.pod.name` | `labels.k8s_pod_name` | `resource.attributes.k8s.pod.name` ✓ |
+| Index | `logs-apm.app.<svc>-default` | `logs-generic.otel-default` |
 
 ### APM server ECS field mapping
 
@@ -639,6 +681,34 @@ FROM logs-apm.app.*
 | STATS instances = COUNT(*) BY service.name
 | SORT instances DESC
 ```
+
+### ES|QL queries — Path B (EDOT Collector → logs-generic.otel-*)
+
+When data flows through the EDOT Collector, all attributes are preserved in their native OTel
+paths. Use `attributes.event\.name` (escape the dot) or the message body filter:
+
+All libraries loaded by a service:
+```esql
+FROM logs-generic.otel-*
+| WHERE attributes.`event.name` == "co.elastic.otel.sca.library.loaded"
+| WHERE resource.attributes.`service.name` == "my-service"
+| KEEP attributes.`library.name`, attributes.`library.version`,
+        attributes.`library.purl`, attributes.`library.id`,
+        attributes.`library.sha256`
+| SORT attributes.`library.name` ASC
+| LIMIT 50
+```
+
+CVE blast radius across all services:
+```esql
+FROM logs-generic.otel-*
+| WHERE attributes.`event.name` == "co.elastic.otel.sca.library.loaded"
+| STATS services = COUNT_DISTINCT(resource.attributes.`service.name`)
+        BY attributes.`library.id`, attributes.`library.purl`
+| SORT services DESC
+```
+
+---
 
 ### Live-validated document structure (APM server 9.3.1)
 
