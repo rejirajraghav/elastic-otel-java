@@ -52,20 +52,20 @@ COPY agent/build/libs/elastic-otel-javaagent-*.jar elastic-otel-javaagent.jar
 
 EXPOSE 8080
 
+# Extract the Spring Boot fat JAR so each BOOT-INF/lib/*.jar becomes a
+# real file with a file:// URL. The SCA extension then discovers all ~150
+# dependencies via the startup classpath scan and URLClassLoader.getURLs().
+# -Djarmode=tools is available in Spring Boot 3.3+.
+RUN java -Djarmode=tools -jar app.jar extract --destination extracted
+
 # ── Required EDOT environment variables ─────────────────────────────────
 # Three vars are mandatory for any EDOT Java deployment:
 #   OTEL_SERVICE_NAME               — logical service name in Kibana
 #   OTEL_EXPORTER_OTLP_ENDPOINT     — EDOT Collector or managed OTLP URL
 #                                     Never set this to an APM Server URL
-#   OTEL_RESOURCE_ATTRIBUTES        — key=value pairs added to every event
-#
 # Do NOT set OTEL_TRACES_EXPORTER, OTEL_METRICS_EXPORTER, or
 # OTEL_LOGS_EXPORTER — EDOT defaults are already correct (OTLP).
-# ── SCA extension environment variables ─────────────────────────────────
-# All ELASTIC_OTEL_SCA_* vars are optional; shown here with defaults.
-# Override at runtime via docker-compose.yml environment: block.
-# Required EDOT vars + SCA extension defaults
-# (all overridable via docker-compose.yml environment: block)
+# ── SCA extension defaults (override via docker-compose.yml) ─────────────
 ENV OTEL_SERVICE_NAME="spring-petclinic" \
     OTEL_EXPORTER_OTLP_ENDPOINT="http://collector:4318" \
     ELASTIC_OTEL_SCA_ENABLED="true" \
@@ -82,9 +82,8 @@ ENV OTEL_SERVICE_NAME="spring-petclinic" \
 # to any java command, including the Spring Boot launcher.
 ENV JAVA_TOOL_OPTIONS="-javaagent:/app/elastic-otel-javaagent.jar"
 
-# Run the Spring Boot fat JAR directly (no extraction needed).
-# The SCA extension's URLClassLoader scan (P2) reads BOOT-INF/lib/
-# nested JARs via Spring Boot's nested classloader, and the
-# jar:nested: protocol handler resolves each inner JAR's metadata.
-# This produces ~150 individual library.loaded events in Kibana.
-CMD ["java", "-jar", "/app/app.jar"]
+# Run the extracted JAR — Spring Boot uses BOOT-INF/lib/*.jar as real
+# file:// paths. The SCA startup classpath scan discovers all ~150
+# dependencies with full SHA-256 + SHA-1 checksums and pom.properties
+# metadata, producing one library.loaded event per library in Kibana.
+CMD ["java", "-jar", "/app/extracted/app.jar"]

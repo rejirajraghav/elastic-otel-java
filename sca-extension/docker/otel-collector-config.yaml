@@ -87,10 +87,6 @@ exporters:
       enabled: true
       initial_interval: 1s
       max_interval: 30s
-      max_elapsed_time: 300s
-    # Log a warning if a batch is too large to index.
-    logs_dynamic_index:
-      enabled: false
 
   # Debug exporter — prints a summary line per record to collector stdout.
   # Useful to confirm SCA events are flowing before checking Kibana.

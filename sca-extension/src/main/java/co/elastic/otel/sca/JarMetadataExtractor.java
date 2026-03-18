@@ -135,11 +135,25 @@ public final class JarMetadataExtractor {
 
     // Parse outer/inner paths from jar: and jar:nested: URLs
     if (urlStr.startsWith("jar:nested:")) {
-      // jar:nested:///path/outer.jar/!BOOT-INF/lib/inner.jar
+      // Spring Boot nested JAR URL formats:
+      //   jar:nested:/path/outer.jar/!BOOT-INF/lib/inner.jar     (1 slash)
+      //   jar:nested:///path/outer.jar/!BOOT-INF/lib/inner.jar   (3 slashes)
+      //   jar:nested:/path/outer.jar/!BOOT-INF/lib/inner.jar!/   (trailing !/)
       int separator = urlStr.indexOf("/!");
       if (separator > 0) {
-        outerPath = urlStr.substring("jar:nested://".length(), separator);
+        // Strip "jar:nested:" prefix then normalize multiple leading slashes to one
+        String rawOuter = urlStr.substring("jar:nested:".length(), separator);
+        while (rawOuter.startsWith("//")) {
+          rawOuter = rawOuter.substring(1);
+        }
+        outerPath = rawOuter;
+        // Strip trailing "!/" or bare "!" that Spring Boot appends
         innerEntry = urlStr.substring(separator + 2);
+        if (innerEntry.endsWith("!/")) {
+          innerEntry = innerEntry.substring(0, innerEntry.length() - 2);
+        } else if (innerEntry.endsWith("!")) {
+          innerEntry = innerEntry.substring(0, innerEntry.length() - 1);
+        }
       }
     } else if (urlStr.startsWith("jar:file:")) {
       // jar:file:///path/outer.jar!/BOOT-INF/lib/inner.jar[!/]
