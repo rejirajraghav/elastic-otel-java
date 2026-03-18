@@ -32,19 +32,26 @@ import java.lang.management.ManagementFactory;
 import java.net.InetAddress;
 import java.net.URI;
 import java.net.URL;
+import java.net.URLClassLoader;
 import java.security.CodeSource;
 import java.security.ProtectionDomain;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.jar.JarFile;
+import java.util.jar.Manifest;
 import java.util.logging.Level;
 
 /**
  * Core SCA service that intercepts class loading, extracts JAR metadata asynchronously, and emits
- * one OTel log event per unique JAR to the {@code co.elastic.otel.sca} instrumentation scope.
+ * one OTel log event per unique JAR (or per embedded library in shaded JARs) to the {@code
+ * co.elastic.otel.sca} instrumentation scope.
  *
  * <p>Design constraints:
  *
@@ -53,8 +60,12 @@ import java.util.logging.Level;
  *       never modified.
  *   <li>Class-loading threads are never blocked; all I/O happens on a single daemon background
  *       thread.
- *   <li>Discovery uses {@link ProtectionDomain#getCodeSource()} rather than {@code
- *       ClassLoader.getResource()} to avoid holding the classloader monitor.
+ *   <li>Discovery uses {@link ProtectionDomain#getCodeSource()} for filesystem JARs and {@link
+ *       URLClassLoader#getURLs()} for nested JAR detection (Spring Boot fat JARs).
+ *   <li>Startup classpath and JPMS module layer are eagerly scanned before the transformer
+ *       registers so no JARs are missed.
+ *   <li>Periodic re-harvest rescans known classloaders and the classpath for dynamic deployments
+ *       (OSGi bundle installs, servlet hot-deploy).
  * </ul>
  */
 public final class JarCollectorService implements ClassFileTransformer {
@@ -77,6 +88,8 @@ public final class JarCollectorService implements ClassFileTransformer {
       AttributeKey.stringKey("library.group_id");
   private static final AttributeKey<String> ATTR_LIBRARY_TYPE =
       AttributeKey.stringKey("library.type");
+  private static final AttributeKey<String> ATTR_LIBRARY_MODULE_TYPE =
+      AttributeKey.stringKey("library.module_type");
   private static final AttributeKey<String> ATTR_LIBRARY_LANGUAGE =
       AttributeKey.stringKey("library.language");
   private static final AttributeKey<String> ATTR_LIBRARY_PATH =
@@ -87,28 +100,36 @@ public final class JarCollectorService implements ClassFileTransformer {
       AttributeKey.stringKey("library.sha256");
   private static final AttributeKey<String> ATTR_LIBRARY_CHECKSUM_SHA256 =
       AttributeKey.stringKey("library.checksum.sha256");
+  private static final AttributeKey<String> ATTR_LIBRARY_SHA1 =
+      AttributeKey.stringKey("library.sha1");
+  private static final AttributeKey<String> ATTR_LIBRARY_CHECKSUM_SHA1 =
+      AttributeKey.stringKey("library.checksum.sha1");
   private static final AttributeKey<String> ATTR_LIBRARY_ID = AttributeKey.stringKey("library.id");
   private static final AttributeKey<String> ATTR_LIBRARY_CLASSLOADER =
       AttributeKey.stringKey("library.classloader");
+  private static final AttributeKey<Boolean> ATTR_LIBRARY_SHADED =
+      AttributeKey.booleanKey("library.shaded");
+  private static final AttributeKey<String> ATTR_LIBRARY_LICENSE =
+      AttributeKey.stringKey("library.license");
 
-  // Event identity (FIX 4)
+  // Event identity
   private static final AttributeKey<String> ATTR_EVENT_NAME = AttributeKey.stringKey("event.name");
   private static final AttributeKey<String> ATTR_EVENT_DOMAIN =
       AttributeKey.stringKey("event.domain");
   private static final AttributeKey<String> ATTR_EVENT_ACTION =
       AttributeKey.stringKey("event.action");
 
-  // Service identity (FIX 3)
+  // Service identity
   private static final AttributeKey<String> ATTR_SERVICE_NAME =
       AttributeKey.stringKey("service.name");
   private static final AttributeKey<String> ATTR_SERVICE_VERSION =
       AttributeKey.stringKey("service.version");
 
-  // Deployment (FIX 2)
+  // Deployment
   private static final AttributeKey<String> ATTR_DEPLOYMENT_ENV =
       AttributeKey.stringKey("deployment.environment.name");
 
-  // Host and process (FIX 3)
+  // Host and process
   private static final AttributeKey<String> ATTR_HOST_NAME = AttributeKey.stringKey("host.name");
   private static final AttributeKey<String> ATTR_PROCESS_PID =
       AttributeKey.stringKey("process.pid");
@@ -117,7 +138,7 @@ public final class JarCollectorService implements ClassFileTransformer {
   private static final AttributeKey<String> ATTR_PROCESS_RUNTIME_VERSION =
       AttributeKey.stringKey("process.runtime.version");
 
-  // Agent identity (FIX 7)
+  // Agent identity
   private static final AttributeKey<String> ATTR_AGENT_NAME = AttributeKey.stringKey("agent.name");
   private static final AttributeKey<String> ATTR_AGENT_TYPE = AttributeKey.stringKey("agent.type");
   private static final AttributeKey<String> ATTR_AGENT_VERSION =
@@ -125,7 +146,7 @@ public final class JarCollectorService implements ClassFileTransformer {
   private static final AttributeKey<String> ATTR_AGENT_EPHEMERAL_ID =
       AttributeKey.stringKey("agent.ephemeral_id");
 
-  // Container / k8s (FIX 8)
+  // Container / k8s
   private static final AttributeKey<String> ATTR_CONTAINER_ID =
       AttributeKey.stringKey("container.id");
   private static final AttributeKey<String> ATTR_K8S_POD_NAME =
@@ -137,7 +158,6 @@ public final class JarCollectorService implements ClassFileTransformer {
 
   // ---- Internal state ----------------------------------------------------
 
-  /** Maximum number of pending JAR paths that can queue before drops begin. */
   private static final int QUEUE_CAPACITY = 500;
 
   private final OpenTelemetrySdk openTelemetry;
@@ -145,26 +165,34 @@ public final class JarCollectorService implements ClassFileTransformer {
   private final SCAConfiguration config;
   private final ResourceContext resourceCtx;
 
-  /** Paths already enqueued or processed — prevents duplicate work. */
+  /** Dedup set for both filesystem paths and URL strings. */
   private final Set<String> seenJarPaths = ConcurrentHashMap.newKeySet();
 
-  /** Total number of JARs admitted (enqueued or processed). Capped at maxJarsTotal. */
+  /**
+   * Classloaders already scanned for URL-based JAR discovery. Prevents rescanning the same
+   * URLClassLoader on every class load from it.
+   */
+  final Set<ClassLoader> seenClassLoaders = ConcurrentHashMap.newKeySet();
+
   private final AtomicInteger totalJarsAdmitted = new AtomicInteger(0);
 
-  /**
-   * Bounded queue of JARs waiting for metadata extraction. Offer is non-blocking; full queue drops
-   * the entry (class loading must never block).
-   */
   private final LinkedBlockingQueue<PendingJar> pendingJars =
       new LinkedBlockingQueue<>(QUEUE_CAPACITY);
 
   private final AtomicBoolean started = new AtomicBoolean(false);
   private final AtomicBoolean stopped = new AtomicBoolean(false);
 
-  /** Names/patterns to identify JARs that should never be reported. */
-  private final String agentJarPath;
+  /**
+   * Rate limiter state shared across the single background thread: earliest time the next emit slot
+   * is available (nanoseconds). Accessed only by the background worker thread.
+   */
+  private long nextEmitNanos = System.nanoTime();
 
+  private final String agentJarPath;
   private final String tmpDir;
+
+  /** Daemon scheduler for periodic re-harvest. Null when re-harvest is disabled. */
+  private ScheduledExecutorService reharvestScheduler;
 
   JarCollectorService(
       OpenTelemetrySdk openTelemetry,
@@ -186,38 +214,177 @@ public final class JarCollectorService implements ClassFileTransformer {
       return;
     }
 
-    // Register transformer — returns null always, observes only
     instrumentation.addTransformer(this, /* canRetransform= */ false);
-
-    // Back-fill classes already loaded before our transformer registered
     scanAlreadyLoadedClasses();
 
-    // Single daemon thread handles all I/O off the class-loading path
     Thread worker = new Thread(this::processQueue, "elastic-sca-jar-collector");
     worker.setDaemon(true);
     worker.setPriority(Thread.MIN_PRIORITY);
     worker.start();
 
-    // Drain remaining queue on JVM shutdown before the OTLP exporter shuts down
     Runtime.getRuntime()
         .addShutdownHook(
             new Thread(
                 () -> {
                   stopped.set(true);
                   worker.interrupt();
+                  if (reharvestScheduler != null) {
+                    reharvestScheduler.shutdown();
+                  }
                 },
                 "elastic-sca-shutdown"));
 
     log.fine("SCA: JarCollectorService started");
   }
 
-  // ---- ClassFileTransformer ----------------------------------------------
+  // ---- Periodic re-harvest -----------------------------------------------
 
   /**
-   * Called by the JVM on every class load. We extract the JAR path from the {@link
-   * ProtectionDomain}, deduplicate, and offer to the background queue. We never transform the
-   * bytecode.
+   * Starts a daemon thread that periodically rescans known classloaders and the startup classpath
+   * for newly added JARs (OSGi bundle installs, servlet hot-deploy, dynamic classpath additions).
+   *
+   * @param intervalSeconds seconds between re-harvest runs; 0 or negative disables the scheduler
    */
+  void startReharvest(int intervalSeconds) {
+    if (intervalSeconds <= 0) {
+      return;
+    }
+    reharvestScheduler =
+        Executors.newSingleThreadScheduledExecutor(
+            r -> {
+              Thread t = new Thread(r, "elastic-sca-reharvest");
+              t.setDaemon(true);
+              return t;
+            });
+    reharvestScheduler.scheduleAtFixedRate(
+        this::reharvest, intervalSeconds, intervalSeconds, TimeUnit.SECONDS);
+    log.fine("SCA: re-harvest scheduled every " + intervalSeconds + "s");
+  }
+
+  private void reharvest() {
+    if (stopped.get()) {
+      return;
+    }
+    log.fine("SCA: running periodic re-harvest");
+    // Re-scan all known URLClassLoaders for any new URLs
+    for (ClassLoader loader : seenClassLoaders) {
+      if (loader instanceof URLClassLoader) {
+        enqueueClassLoaderUrls((URLClassLoader) loader);
+      }
+    }
+    // Re-check startup classpath in case entries were added dynamically
+    if (config.isScanStartupClasspath()) {
+      scanStartupClasspath();
+    }
+  }
+
+  // ---- Startup scanning --------------------------------------------------
+
+  /**
+   * Eagerly enqueues JARs declared on the JVM classpath before the ClassFileTransformer registers.
+   * This catches JARs whose classes may never be loaded (optional dependencies) and ensures Spring
+   * Boot fat JARs delegating to system classloaders are discovered.
+   */
+  void scanStartupClasspath() {
+    enqueueClasspathString(System.getProperty("java.class.path", ""));
+
+    try {
+      enqueueClasspathString(ManagementFactory.getRuntimeMXBean().getClassPath());
+    } catch (Exception e) {
+      log.log(Level.FINE, "SCA: could not read runtime classpath from ManagementFactory", e);
+    }
+
+    ClassLoader systemCl = ClassLoader.getSystemClassLoader();
+    if (systemCl instanceof URLClassLoader) {
+      enqueueClassLoaderUrls((URLClassLoader) systemCl);
+    }
+  }
+
+  private void enqueueClasspathString(String classpath) {
+    if (classpath == null || classpath.isEmpty()) {
+      return;
+    }
+    for (String entry : classpath.split(File.pathSeparator)) {
+      if (entry.endsWith(".jar")) {
+        enqueueJarPath(entry, "classpath");
+      }
+    }
+  }
+
+  /**
+   * Scans the JPMS module layer (Java 9+) to discover module-path JARs. Uses reflection for Java 8
+   * source compatibility.
+   */
+  void scanModuleLayer() {
+    try {
+      Class<?> moduleLayerClass = Class.forName("java.lang.ModuleLayer");
+      Object bootLayer = moduleLayerClass.getMethod("boot").invoke(null);
+      Set<?> modules = (Set<?>) moduleLayerClass.getMethod("modules").invoke(bootLayer);
+      Class<?> moduleClass = Class.forName("java.lang.Module");
+
+      for (Object module : modules) {
+        try {
+          // Discover via classloader if it is a URLClassLoader
+          ClassLoader cl = (ClassLoader) moduleClass.getMethod("getClassLoader").invoke(module);
+          if (cl instanceof URLClassLoader && seenClassLoaders.add(cl)) {
+            enqueueClassLoaderUrls((URLClassLoader) cl);
+          }
+
+          // Discover via module descriptor name + location
+          Object descriptor = moduleClass.getMethod("getDescriptor").invoke(module);
+          if (descriptor == null) {
+            continue;
+          }
+          Class<?> descClass = Class.forName("java.lang.module.ModuleDescriptor");
+          String moduleName = (String) descClass.getMethod("name").invoke(descriptor);
+
+          // Skip JDK built-in modules
+          if (moduleName.startsWith("java.")
+              || moduleName.startsWith("jdk.")
+              || moduleName.startsWith("sun.")) {
+            continue;
+          }
+
+          // Try to get the JAR location via ModuleLayer.configuration()
+          Object configuration = moduleLayerClass.getMethod("configuration").invoke(bootLayer);
+          Class<?> configClass = Class.forName("java.lang.module.Configuration");
+          java.util.Optional<?> moduleRef =
+              (java.util.Optional<?>)
+                  configClass
+                      .getMethod("findModule", String.class)
+                      .invoke(configuration, moduleName);
+          if (!moduleRef.isPresent()) {
+            continue;
+          }
+          Class<?> resolvedModuleClass = Class.forName("java.lang.module.ResolvedModule");
+          Object resolvedModule = moduleRef.get();
+          Object reference = resolvedModuleClass.getMethod("reference").invoke(resolvedModule);
+          Class<?> moduleRefClass = Class.forName("java.lang.module.ModuleReference");
+          java.util.Optional<?> locationOpt =
+              (java.util.Optional<?>) moduleRefClass.getMethod("location").invoke(reference);
+          if (!locationOpt.isPresent()) {
+            continue;
+          }
+          java.net.URI moduleUri = (java.net.URI) locationOpt.get();
+          String scheme = moduleUri.getScheme();
+          if ("file".equals(scheme)) {
+            File jarFile = new File(moduleUri);
+            if (jarFile.getName().endsWith(".jar")) {
+              enqueueJarPath(jarFile.getAbsolutePath(), "jpms-module");
+            }
+          }
+        } catch (Exception ignored) {
+        }
+      }
+    } catch (ClassNotFoundException e) {
+      // Java 8: no module system — nothing to do
+    } catch (Exception e) {
+      log.log(Level.FINE, "SCA: module layer scan failed (non-critical)", e);
+    }
+  }
+
+  // ---- ClassFileTransformer ----------------------------------------------
+
   @Override
   public byte[] transform(
       ClassLoader loader,
@@ -225,14 +392,16 @@ public final class JarCollectorService implements ClassFileTransformer {
       Class<?> classBeingRedefined,
       ProtectionDomain protectionDomain,
       byte[] classfileBuffer) {
-    // Skip bootstrap classloader (null) and already-stopped state
     if (loader == null || className == null || stopped.get()) {
       return null;
     }
     try {
       enqueueFromProtectionDomain(loader, protectionDomain);
+
+      if (loader instanceof URLClassLoader && seenClassLoaders.add(loader)) {
+        enqueueClassLoaderUrls((URLClassLoader) loader);
+      }
     } catch (Exception ignored) {
-      // Must never propagate out of transform()
     }
     return null;
   }
@@ -251,45 +420,101 @@ public final class JarCollectorService implements ClassFileTransformer {
     if (location == null) {
       return;
     }
+
+    String urlStr = location.toString();
+    if (urlStr.startsWith("jar:nested:")) {
+      enqueueUrl(location, loader.getClass().getName());
+      return;
+    }
+
     String jarPath = locationToJarPath(location);
     if (jarPath == null || !jarPath.endsWith(".jar")) {
       return;
     }
+    enqueueJarPath(jarPath, loader.getClass().getName());
+  }
+
+  private void enqueueClassLoaderUrls(URLClassLoader loader) {
+    try {
+      URL[] urls = loader.getURLs();
+      String classloaderName = loader.getClass().getName();
+      for (URL url : urls) {
+        String urlStr = url.toString();
+        if (isJarUrl(urlStr)) {
+          if (urlStr.startsWith("file:") && urlStr.endsWith(".jar")) {
+            try {
+              String path = new File(url.toURI()).getAbsolutePath();
+              enqueueJarPath(path, classloaderName);
+              continue;
+            } catch (Exception ignored) {
+            }
+          }
+          enqueueUrl(url, classloaderName);
+        }
+      }
+    } catch (Exception e) {
+      log.log(Level.FINE, "SCA: failed to scan classloader URLs", e);
+    }
+  }
+
+  private boolean isJarUrl(String urlStr) {
+    return (urlStr.endsWith(".jar")
+            || urlStr.endsWith(".jar!/")
+            || urlStr.contains(".jar!/")
+            || urlStr.contains(".jar/!"))
+        && !shouldSkipKey(urlStr);
+  }
+
+  void enqueueJarPath(String jarPath, String classloaderName) {
     if (shouldSkip(jarPath)) {
       return;
     }
-    // Cap total JARs to prevent unbounded seenJarPaths growth in long-running apps
+    admitAndOffer(jarPath, new PendingJar(jarPath, classloaderName));
+  }
+
+  private void enqueueUrl(URL url, String classloaderName) {
+    String key = url.toString();
+    if (shouldSkipKey(key)) {
+      return;
+    }
+    admitAndOffer(key, new PendingJar(url, classloaderName));
+  }
+
+  private void admitAndOffer(String key, PendingJar jar) {
     if (totalJarsAdmitted.get() >= config.getMaxJarsTotal()) {
       return;
     }
-    if (!seenJarPaths.add(jarPath)) {
-      return; // already seen
+    if (!seenJarPaths.add(key)) {
+      return;
     }
     totalJarsAdmitted.incrementAndGet();
-
-    String classloaderName = loader.getClass().getName();
-    // Non-blocking offer: if the queue is full we drop this JAR rather than stall a class-loading
-    // thread. Remove from seen-set so a future class load from the same JAR gets another chance.
-    if (!pendingJars.offer(new PendingJar(jarPath, classloaderName))) {
-      seenJarPaths.remove(jarPath);
+    if (!pendingJars.offer(jar)) {
+      seenJarPaths.remove(key);
       totalJarsAdmitted.decrementAndGet();
-      log.fine("SCA: queue full, dropping JAR (will retry on next class load): " + jarPath);
+      log.fine("SCA: queue full, dropping: " + key);
     }
   }
 
   /**
-   * Converts a {@link CodeSource} location URL to an absolute filesystem path. Handles the common
-   * {@code file:/path/to/foo.jar} form produced by most classloaders.
+   * Converts a {@link CodeSource} location URL to an absolute filesystem path. Handles {@code
+   * file://}, {@code jar:file://}, and {@code jar:nested://} (Spring Boot 3.2+).
    */
   static String locationToJarPath(URL location) {
     try {
       if ("file".equals(location.getProtocol())) {
-        // Use URI to correctly handle spaces (%20) and other encoded chars
         return new File(location.toURI()).getAbsolutePath();
       }
-      // jar:file:/path/to/outer.jar!/  — nested JAR (Spring Boot, etc.)
       if ("jar".equals(location.getProtocol())) {
-        String path = location.getPath(); // file:/path/to/outer.jar!/
+        String path = location.getPath();
+        if (path.startsWith("nested:")) {
+          int separator = path.indexOf("/!");
+          String outerPart =
+              (separator > 0) ? path.substring("nested://".length(), separator) : path;
+          if (outerPart.endsWith("/")) {
+            outerPart = outerPart.substring(0, outerPart.length() - 1);
+          }
+          return outerPart;
+        }
         int bang = path.indexOf('!');
         if (bang >= 0) {
           path = path.substring(0, bang);
@@ -297,19 +522,22 @@ public final class JarCollectorService implements ClassFileTransformer {
         return new File(new URI(path)).getAbsolutePath();
       }
     } catch (Exception ignored) {
-      // Malformed URL — skip silently
     }
     return null;
   }
 
   private void scanAlreadyLoadedClasses() {
     try {
+      Set<ClassLoader> seen = ConcurrentHashMap.newKeySet();
       for (Class<?> cls : instrumentation.getAllLoadedClasses()) {
         ClassLoader loader = cls.getClassLoader();
         if (loader == null) {
-          continue; // bootstrap
+          continue;
         }
         enqueueFromProtectionDomain(loader, cls.getProtectionDomain());
+        if (loader instanceof URLClassLoader && seen.add(loader)) {
+          enqueueClassLoaderUrls((URLClassLoader) loader);
+        }
       }
     } catch (Exception e) {
       log.log(Level.FINE, "SCA: error scanning already-loaded classes", e);
@@ -319,7 +547,6 @@ public final class JarCollectorService implements ClassFileTransformer {
   // ---- Background processing ---------------------------------------------
 
   private void processQueue() {
-    // FIX 5: set schemaUrl and instrumentationVersion on the OTel logger
     Logger otelLogger =
         openTelemetry
             .getLogsBridge()
@@ -327,11 +554,6 @@ public final class JarCollectorService implements ClassFileTransformer {
             .setSchemaUrl(OTEL_SCHEMA_URL)
             .setInstrumentationVersion(resourceCtx.agentVersion)
             .build();
-
-    // Token-bucket style rate limiter: track the earliest time the next JAR may be emitted
-    long nextEmitNanos = System.nanoTime();
-    long intervalNanos =
-        config.getJarsPerSecond() > 0 ? (1_000_000_000L / config.getJarsPerSecond()) : 0L;
 
     while (!stopped.get()) {
       PendingJar pending;
@@ -344,26 +566,9 @@ public final class JarCollectorService implements ClassFileTransformer {
       if (pending == null) {
         continue;
       }
-
-      // Rate limit: wait until the next emission slot is available
-      if (intervalNanos > 0) {
-        long now = System.nanoTime();
-        long delay = nextEmitNanos - now;
-        if (delay > 0) {
-          try {
-            TimeUnit.NANOSECONDS.sleep(delay);
-          } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            break;
-          }
-        }
-        nextEmitNanos = Math.max(System.nanoTime(), nextEmitNanos) + intervalNanos;
-      }
-
       processJar(pending, otelLogger);
     }
 
-    // Drain remaining entries during shutdown
     PendingJar remaining;
     while ((remaining = pendingJars.poll()) != null) {
       processJar(remaining, otelLogger);
@@ -373,24 +578,99 @@ public final class JarCollectorService implements ClassFileTransformer {
 
   private void processJar(PendingJar pending, Logger otelLogger) {
     try {
-      JarMetadata meta = JarMetadataExtractor.extract(pending.jarPath, pending.classloaderName);
-      if (meta != null) {
+      List<JarMetadata> metas;
+      if (pending.jarUrl != null) {
+        JarMetadata meta =
+            JarMetadataExtractor.extractFromUrl(pending.jarUrl, pending.classloaderName);
+        metas = java.util.Collections.singletonList(meta);
+      } else {
+        metas = JarMetadataExtractor.extract(pending.jarPath, pending.classloaderName);
+        // Honour detect_shaded_jars flag: if disabled, use only the first entry
+        if (!config.isDetectShadedJars() && metas.size() > 1) {
+          metas = metas.subList(0, 1);
+        }
+      }
+
+      for (JarMetadata meta : metas) {
+        // Apply rate limiting per emitted event (important for shaded JARs with many entries)
+        applyRateLimit();
+        if (stopped.get()) {
+          break;
+        }
         emitLogRecord(meta, otelLogger);
       }
+
+      // Priority 6: Follow MANIFEST Class-Path entries (one level deep)
+      if (config.isFollowManifestClasspath() && pending.jarPath != null) {
+        followClassPathEntries(pending.jarPath);
+      }
     } catch (Exception e) {
-      log.log(Level.FINE, "SCA: error processing JAR: " + pending.jarPath, e);
+      log.log(Level.FINE, "SCA: error processing JAR: " + pending.dedupeKey, e);
+    }
+  }
+
+  /**
+   * Applies per-event rate limiting. Must be called only from the single background worker thread.
+   */
+  private void applyRateLimit() {
+    if (config.getJarsPerSecond() <= 0) {
+      return;
+    }
+    long intervalNanos = 1_000_000_000L / config.getJarsPerSecond();
+    long now = System.nanoTime();
+    long delay = nextEmitNanos - now;
+    if (delay > 0) {
+      try {
+        TimeUnit.NANOSECONDS.sleep(delay);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+      }
+    }
+    nextEmitNanos = Math.max(System.nanoTime(), nextEmitNanos) + intervalNanos;
+  }
+
+  /**
+   * Reads the {@code Class-Path} manifest attribute of the given JAR and enqueues any referenced
+   * JARs that exist on the filesystem. Only one level deep — no recursive following.
+   */
+  private void followClassPathEntries(String jarPath) {
+    File jarFile = new File(jarPath);
+    if (!jarFile.exists()) {
+      return;
+    }
+    try (JarFile jar = new JarFile(jarFile, /* verify= */ false)) {
+      Manifest manifest = jar.getManifest();
+      if (manifest == null) {
+        return;
+      }
+      String classPath = manifest.getMainAttributes().getValue("Class-Path");
+      if (classPath == null || classPath.isEmpty()) {
+        return;
+      }
+      String jarDir = jarFile.getParent();
+      if (jarDir == null) {
+        return;
+      }
+      for (String entry : classPath.split("\\s+")) {
+        if (entry.endsWith(".jar")) {
+          File resolved = new File(jarDir, entry);
+          if (resolved.exists() && resolved.isFile()) {
+            enqueueJarPath(resolved.getAbsolutePath(), "manifest-classpath");
+          }
+        }
+      }
+    } catch (Exception e) {
+      log.log(Level.FINE, "SCA: Class-Path follow failed for " + jarPath, e);
     }
   }
 
   private void emitLogRecord(JarMetadata meta, Logger otelLogger) {
-    // FIX 6: descriptive body format
     String coords =
         meta.groupId.isEmpty()
             ? meta.name + ":" + meta.version
             : meta.groupId + ":" + meta.name + ":" + meta.version;
     String body = "JAR loaded: " + coords + " path=" + meta.jarPath;
 
-    // Maven coordinate for CVE advisory matching: groupId:artifactId:version
     String libraryId =
         meta.groupId.isEmpty()
             ? meta.name + ":" + meta.version
@@ -398,39 +678,41 @@ public final class JarCollectorService implements ClassFileTransformer {
 
     AttributesBuilder attrs =
         Attributes.builder()
-            // Library identity (FIX 1)
             .put(ATTR_LIBRARY_NAME, meta.name)
             .put(ATTR_LIBRARY_VERSION, meta.version)
             .put(ATTR_LIBRARY_GROUP_ID, meta.groupId)
             .put(ATTR_LIBRARY_ID, libraryId)
             .put(ATTR_LIBRARY_TYPE, "jar")
+            .put(ATTR_LIBRARY_MODULE_TYPE, meta.moduleType)
             .put(ATTR_LIBRARY_LANGUAGE, "java")
             .put(ATTR_LIBRARY_PATH, meta.jarPath)
             .put(ATTR_LIBRARY_PURL, meta.purl)
             .put(ATTR_LIBRARY_SHA256, meta.sha256)
             .put(ATTR_LIBRARY_CHECKSUM_SHA256, meta.sha256)
+            .put(ATTR_LIBRARY_SHA1, meta.sha1)
+            .put(ATTR_LIBRARY_CHECKSUM_SHA1, meta.sha1)
             .put(ATTR_LIBRARY_CLASSLOADER, meta.classloaderName)
-            // Event identity (FIX 4)
+            .put(ATTR_LIBRARY_SHADED, meta.shaded)
             .put(ATTR_EVENT_NAME, "co.elastic.otel.sca.library.loaded")
             .put(ATTR_EVENT_DOMAIN, "sca")
             .put(ATTR_EVENT_ACTION, "library-loaded")
-            // Service identity (FIX 3)
             .put(ATTR_SERVICE_NAME, resourceCtx.serviceName)
             .put(ATTR_SERVICE_VERSION, resourceCtx.serviceVersion)
-            // Deployment (FIX 2)
             .put(ATTR_DEPLOYMENT_ENV, resourceCtx.deploymentEnv)
-            // Host and process (FIX 1 + 3)
             .put(ATTR_HOST_NAME, resourceCtx.hostName)
             .put(ATTR_PROCESS_PID, resourceCtx.processPid)
             .put(ATTR_PROCESS_RUNTIME_NAME, resourceCtx.processRuntimeName)
             .put(ATTR_PROCESS_RUNTIME_VERSION, resourceCtx.processRuntimeVersion)
-            // Agent identity (FIX 7)
             .put(ATTR_AGENT_NAME, "elastic-otel-java")
             .put(ATTR_AGENT_TYPE, "opentelemetry")
             .put(ATTR_AGENT_VERSION, resourceCtx.agentVersion)
             .put(ATTR_AGENT_EPHEMERAL_ID, resourceCtx.ephemeralId);
 
-    // Container / k8s — only emit when present (FIX 8)
+    // Emit license only when detected
+    if (!meta.license.isEmpty()) {
+      attrs.put(ATTR_LIBRARY_LICENSE, meta.license);
+    }
+
     if (!resourceCtx.containerId.isEmpty()) {
       attrs.put(ATTR_CONTAINER_ID, resourceCtx.containerId);
     }
@@ -451,19 +733,76 @@ public final class JarCollectorService implements ClassFileTransformer {
   // ---- Filtering ---------------------------------------------------------
 
   private boolean shouldSkip(String jarPath) {
-    // Always skip the EDOT / upstream OTel agent JAR
+    if (jarPath == null) {
+      return true;
+    }
     String fileName = new File(jarPath).getName();
-    if (fileName.contains("elastic-otel-javaagent")
-        || fileName.contains("opentelemetry-javaagent")) {
+    String lower = fileName.toLowerCase();
+
+    // Always skip agent JARs
+    if (lower.contains("elastic-otel-javaagent") || lower.contains("opentelemetry-javaagent")) {
       return true;
     }
-    if (agentJarPath != null && agentJarPath.equals(jarPath)) {
+    if (agentJarPath != null && agentJarPath.equals(normalise(jarPath))) {
       return true;
     }
-    // Skip temp JARs (e.g. JRuby, Groovy, or Spring Boot's exploded cache)
+
+    // Always skip source and javadoc JARs (no executable code)
+    if (lower.endsWith("-sources.jar")
+        || lower.endsWith("-javadoc.jar")
+        || lower.endsWith("-sources-tests.jar")) {
+      return true;
+    }
+
+    // Optionally skip test JARs
+    if (config.isSkipTestJars()) {
+      if (lower.endsWith("-tests.jar") || lower.endsWith("-test.jar")) {
+        return true;
+      }
+    }
+
+    // Skip IDE and build tool internals
+    String normPath = normalise(jarPath);
+    if (normPath.contains("/.gradle/daemon/")
+        || normPath.contains("/gradle/wrapper/")
+        || normPath.contains("/.m2/wrapper/")) {
+      return true;
+    }
+
+    // Skip temp directories
     if (config.isSkipTempJars()) {
-      String normPath = normalise(jarPath);
-      if (normPath.startsWith(tmpDir) || normPath.contains("/tmp/")) {
+      if (normPath.startsWith(tmpDir)
+          || normPath.contains("/tmp/")
+          || normPath.contains("/temp/")) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  /** Applies skip rules to a URL or key string (for nested/classpath-derived entries). */
+  private boolean shouldSkipKey(String key) {
+    if (key == null) {
+      return true;
+    }
+    String lower = key.toLowerCase();
+    if (lower.contains("elastic-otel-javaagent") || lower.contains("opentelemetry-javaagent")) {
+      return true;
+    }
+    if (lower.endsWith("-sources.jar")
+        || lower.endsWith("-javadoc.jar")
+        || lower.endsWith("-sources-tests.jar")) {
+      return true;
+    }
+    if (config.isSkipTestJars()) {
+      if (lower.endsWith("-tests.jar") || lower.endsWith("-test.jar")) {
+        return true;
+      }
+    }
+    if (config.isSkipTempJars()) {
+      String norm = normalise(key);
+      if (norm.contains("/tmp/") || norm.contains("/temp/")) {
         return true;
       }
     }
@@ -472,17 +811,11 @@ public final class JarCollectorService implements ClassFileTransformer {
 
   // ---- Utilities ---------------------------------------------------------
 
-  /**
-   * Best-effort: resolve the path of the agent JAR so we can exclude it from reporting. The test
-   * harness in {@code custom} sets {@code elastic.otel.agent.jar.path}; in production we scan the
-   * command line.
-   */
   private static String resolveAgentJarPath() {
     String path = System.getProperty("elastic.otel.agent.jar.path");
     if (path != null) {
       return normalise(path);
     }
-    // Fallback: parse -javaagent flag from the JVM command line
     String cmd = System.getProperty("sun.java.command", "");
     for (String token : cmd.split("\\s+")) {
       if (token.contains("elastic-otel-javaagent") || token.contains("opentelemetry-javaagent")) {
@@ -498,22 +831,27 @@ public final class JarCollectorService implements ClassFileTransformer {
 
   // ---- Inner types -------------------------------------------------------
 
-  /** Lightweight holder placed in the pending queue. */
   private static final class PendingJar {
+    final String dedupeKey;
     final String jarPath;
+    final URL jarUrl;
     final String classloaderName;
 
     PendingJar(String jarPath, String classloaderName) {
+      this.dedupeKey = jarPath;
       this.jarPath = jarPath;
+      this.jarUrl = null;
+      this.classloaderName = classloaderName;
+    }
+
+    PendingJar(URL jarUrl, String classloaderName) {
+      this.dedupeKey = jarUrl.toString();
+      this.jarPath = null;
+      this.jarUrl = jarUrl;
       this.classloaderName = classloaderName;
     }
   }
 
-  /**
-   * Pre-extracted context attributes that are identical for every log record emitted by this
-   * service instance. Built once at startup in {@link SCAExtension#afterAgent} and passed into the
-   * constructor, avoiding repeated system-property lookups on the hot path.
-   */
   static final class ResourceContext {
     final String deploymentEnv;
     final String serviceName;
@@ -558,10 +896,6 @@ public final class JarCollectorService implements ClassFileTransformer {
       this.k8sNodeName = k8sNodeName;
     }
 
-    /**
-     * Builds the context by reading system properties, environment variables, and best-effort
-     * reflection on the SDK resource for container / k8s fields.
-     */
     static ResourceContext build(AutoConfiguredOpenTelemetrySdk sdk, String ephemeralId) {
       String deploymentEnv = resolveDeploymentEnv();
       String serviceName =
@@ -580,9 +914,6 @@ public final class JarCollectorService implements ClassFileTransformer {
       String processRuntimeVersion = coalesce(System.getProperty("java.runtime.version"), "");
       String agentVersion = resolveAgentVersion();
 
-      // Best-effort: extract container / k8s context from the SDK resource via reflection.
-      // AutoConfiguredOpenTelemetrySdk.getResource() is package-private; we use reflection so
-      // the extension continues to work if the internal API changes.
       String containerId = "";
       String k8sPodName = "";
       String k8sNamespace = "";
@@ -596,7 +927,6 @@ public final class JarCollectorService implements ClassFileTransformer {
         k8sNamespace = resourceAttr(resource, "k8s.namespace.name");
         k8sNodeName = resourceAttr(resource, "k8s.node.name");
       } catch (Exception ignored) {
-        // Resource not accessible — container/k8s fields remain empty
       }
 
       return new ResourceContext(
@@ -621,26 +951,19 @@ public final class JarCollectorService implements ClassFileTransformer {
       return "null".equals(s) ? "" : s;
     }
 
-    /**
-     * Reads deployment.environment.name from (in priority order): system property, env var, then
-     * the {@code otel.resource.attributes} bag.
-     */
     private static String resolveDeploymentEnv() {
       String v = System.getProperty("deployment.environment.name");
       if (v != null && !v.isEmpty()) return v;
       v = System.getenv("DEPLOYMENT_ENVIRONMENT_NAME");
       if (v != null && !v.isEmpty()) return v;
-      // Fallback: try older OTel key
       v = System.getProperty("deployment.environment");
       if (v != null && !v.isEmpty()) return v;
       v = System.getenv("DEPLOYMENT_ENVIRONMENT");
       if (v != null && !v.isEmpty()) return v;
-      // Last resort: parse otel.resource.attributes
       return parseResourceAttribute(
           "deployment.environment.name", parseResourceAttribute("deployment.environment", ""));
     }
 
-    /** Parses a single key from the {@code key1=val1,key2=val2} resource attributes string. */
     private static String parseResourceAttribute(String key, String defaultValue) {
       String bag =
           coalesce(
@@ -666,7 +989,6 @@ public final class JarCollectorService implements ClassFileTransformer {
 
     private static String resolveProcessPid() {
       try {
-        // ManagementFactory name format: "pid@hostname"
         String name = ManagementFactory.getRuntimeMXBean().getName();
         int at = name.indexOf('@');
         return at > 0 ? name.substring(0, at) : name;
@@ -675,11 +997,6 @@ public final class JarCollectorService implements ClassFileTransformer {
       }
     }
 
-    /**
-     * Reads the EDOT / OTel agent version via reflection on {@code
-     * io.opentelemetry.javaagent.tooling.AgentVersion}, which lives in the agent classloader at
-     * runtime even though it is not a compile-time dependency.
-     */
     private static String resolveAgentVersion() {
       try {
         Class<?> cls = Class.forName("io.opentelemetry.javaagent.tooling.AgentVersion");

@@ -93,6 +93,31 @@ public class SCAExtension implements AutoConfigurationCustomizerProvider, AgentL
               defaults,
               SCAConfiguration.MAX_JARS_TOTAL_KEY,
               Integer.toString(SCAConfiguration.DEFAULT_MAX_JARS_TOTAL));
+          setDefault(
+              props,
+              defaults,
+              SCAConfiguration.SKIP_TEST_JARS_KEY,
+              Boolean.toString(SCAConfiguration.DEFAULT_SKIP_TEST_JARS));
+          setDefault(
+              props,
+              defaults,
+              SCAConfiguration.REHARVEST_INTERVAL_KEY,
+              Integer.toString(SCAConfiguration.DEFAULT_REHARVEST_INTERVAL_SECONDS));
+          setDefault(
+              props,
+              defaults,
+              SCAConfiguration.SCAN_STARTUP_CLASSPATH_KEY,
+              Boolean.toString(SCAConfiguration.DEFAULT_SCAN_STARTUP_CLASSPATH));
+          setDefault(
+              props,
+              defaults,
+              SCAConfiguration.FOLLOW_MANIFEST_CLASSPATH_KEY,
+              Boolean.toString(SCAConfiguration.DEFAULT_FOLLOW_MANIFEST_CLASSPATH));
+          setDefault(
+              props,
+              defaults,
+              SCAConfiguration.DETECT_SHADED_JARS_KEY,
+              Boolean.toString(SCAConfiguration.DEFAULT_DETECT_SHADED_JARS));
           return defaults;
         });
   }
@@ -142,7 +167,13 @@ public class SCAExtension implements AutoConfigurationCustomizerProvider, AgentL
             instrumentation,
             config,
             resourceCtx);
+
+    // Eagerly scan the startup classpath and JPMS module layer before registering the
+    // ClassFileTransformer so that JARs whose classes are never loaded are also reported.
+    service.scanStartupClasspath();
+    service.scanModuleLayer();
     service.start();
+    service.startReharvest(config.getReharvestIntervalSeconds());
   }
 
   /**

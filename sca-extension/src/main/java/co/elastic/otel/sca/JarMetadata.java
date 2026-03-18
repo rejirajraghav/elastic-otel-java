@@ -18,8 +18,23 @@
  */
 package co.elastic.otel.sca;
 
-/** Immutable value object holding extracted metadata for a single JAR file. */
+/** Immutable value object holding extracted metadata for a single JAR file or embedded library. */
 public final class JarMetadata {
+
+  // ---- library.module_type values ------------------------------------------
+  /** Regular filesystem JAR loaded from classpath or ProtectionDomain. */
+  static final String TYPE_JAR = "jar";
+
+  /** Inner JAR entry discovered via URLClassLoader (Spring Boot BOOT-INF/lib/). */
+  static final String TYPE_NESTED_JAR = "nested-jar";
+
+  /** A library entry extracted from a shaded / uber-JAR. */
+  static final String TYPE_SHADED_ENTRY = "shaded-entry";
+
+  /** A module registered on the Java 9+ module path. */
+  static final String TYPE_JPMS_MODULE = "jpms-module";
+
+  // ---- Fields --------------------------------------------------------------
 
   /** The artifact name (artifactId from Maven, or Implementation-Title, or parsed filename). */
   final String name;
@@ -36,14 +51,36 @@ public final class JarMetadata {
    */
   final String purl;
 
-  /** The absolute filesystem path to the JAR file. */
+  /** The absolute filesystem path to the JAR file (or URL string for nested JARs). */
   final String jarPath;
 
   /** Hex-encoded SHA-256 digest of the JAR file bytes. Empty string on I/O error. */
   final String sha256;
 
+  /** Hex-encoded SHA-1 digest of the JAR file bytes. Empty string on I/O error. */
+  final String sha1;
+
   /** The {@link ClassLoader#getClass() class name} of the classloader that first loaded from it. */
   final String classloaderName;
+
+  /**
+   * True when this metadata entry was extracted from a shaded/uber-JAR that embeds multiple
+   * libraries. Multiple {@link JarMetadata} instances from the same JAR share {@link #jarPath},
+   * {@link #sha256}, and {@link #sha1} but differ in identity fields.
+   */
+  final boolean shaded;
+
+  /**
+   * SPDX license identifier detected from the JAR ({@code Bundle-License} manifest attribute or a
+   * {@code META-INF/LICENSE*} file). Empty string when not determinable.
+   */
+  final String license;
+
+  /**
+   * Describes how this library was discovered. One of {@link #TYPE_JAR}, {@link #TYPE_NESTED_JAR},
+   * {@link #TYPE_SHADED_ENTRY}, or {@link #TYPE_JPMS_MODULE}.
+   */
+  final String moduleType;
 
   JarMetadata(
       String name,
@@ -52,14 +89,22 @@ public final class JarMetadata {
       String purl,
       String jarPath,
       String sha256,
-      String classloaderName) {
+      String sha1,
+      String classloaderName,
+      boolean shaded,
+      String license,
+      String moduleType) {
     this.name = name;
     this.version = version;
     this.groupId = groupId;
     this.purl = purl;
     this.jarPath = jarPath;
     this.sha256 = sha256;
+    this.sha1 = sha1;
     this.classloaderName = classloaderName;
+    this.shaded = shaded;
+    this.license = license;
+    this.moduleType = moduleType;
   }
 
   @Override
@@ -77,6 +122,14 @@ public final class JarMetadata {
         + ", purl='"
         + purl
         + '\''
+        + ", moduleType='"
+        + moduleType
+        + '\''
+        + ", license='"
+        + license
+        + '\''
+        + ", shaded="
+        + shaded
         + '}';
   }
 }
