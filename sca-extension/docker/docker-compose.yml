@@ -9,13 +9,51 @@
 # Run (from repo root):
 #   docker compose -f sca-extension/docker/docker-compose.yml up --build
 #
-# Verify SCA events in Kibana (ES|QL):
+# ── Verify SCA events in Kibana (ES|QL) ──────────────────────────────
+#
+# All SCA events (library inventory):
 #   FROM logs-generic.otel-default
 #   | WHERE attributes.`event.name` == "co.elastic.otel.sca.library.loaded"
 #   | WHERE resource.attributes.`service.name` == "spring-petclinic"
-#   | KEEP attributes.`library.name`, attributes.`library.version`,
-#           attributes.`library.purl`, attributes.`library.sha256`
+#   | KEEP attributes.`library.name`,
+#           attributes.`library.version`,
+#           attributes.`library.group_id`,
+#           attributes.`library.purl`,
+#           attributes.`library.sha256`,
+#           attributes.`library.sha1`,
+#           attributes.`library.license`,
+#           attributes.`library.shaded`,
+#           attributes.`library.module_type`,
+#           attributes.`library.path`
 #   | SORT attributes.`library.name` ASC
+#
+# Shaded/uber-JAR entries only:
+#   FROM logs-generic.otel-default
+#   | WHERE attributes.`event.name` == "co.elastic.otel.sca.library.loaded"
+#   | WHERE attributes.`library.shaded` == true
+#   | KEEP attributes.`library.name`, attributes.`library.version`,
+#           attributes.`library.group_id`, attributes.`library.purl`
+#   | SORT attributes.`library.name` ASC
+#
+# License inventory:
+#   FROM logs-generic.otel-default
+#   | WHERE attributes.`event.name` == "co.elastic.otel.sca.library.loaded"
+#   | WHERE attributes.`library.license` IS NOT NULL
+#   | STATS count = COUNT(*) BY attributes.`library.license`
+#   | SORT count DESC
+#
+# Libraries with empty group_id (incomplete pURL):
+#   FROM logs-generic.otel-default
+#   | WHERE attributes.`event.name` == "co.elastic.otel.sca.library.loaded"
+#   | WHERE attributes.`library.group_id` == ""
+#   | KEEP attributes.`library.name`, attributes.`library.version`,
+#           attributes.`library.purl`, attributes.`library.module_type`
+#
+# Total library count by module type:
+#   FROM logs-generic.otel-default
+#   | WHERE attributes.`event.name` == "co.elastic.otel.sca.library.loaded"
+#   | STATS count = COUNT(*) BY attributes.`library.module_type`
+#   | SORT count DESC
 # ============================================================
 
 services:
@@ -28,7 +66,6 @@ services:
     image: edot-collector:latest
     container_name: edot-collector
     restart: unless-stopped
-    # Run elastic-agent in OTel collector mode with our config
     command: ["--config", "/etc/otelcol-config.yml"]
     deploy:
       resources:
@@ -38,16 +75,12 @@ services:
       - "4317:4317"    # OTLP gRPC
       - "4318:4318"    # OTLP HTTP (EDOT Java default)
     environment:
-      ELASTIC_AGENT_OTEL: "true"       # run elastic-agent in OTel collector mode
+      ELASTIC_AGENT_OTEL: "true"
       ELASTIC_ENDPOINT: "${ELASTIC_ENDPOINT}"
       ELASTIC_API_KEY: "${ELASTIC_API_KEY}"
       STORAGE_DIR: "/usr/share/elastic-agent"
-    # No healthcheck — elastic-agent image has no curl/wget/ss
-    # petclinic uses service_started + a startup delay instead
 
   # ---- Load Generator ----------------------------------------
-  # Continuously hits PetClinic endpoints to produce a steady stream
-  # of traces, HTTP spans, and DB spans visible in Kibana Service Map.
   load-generator:
     image: alpine:3.19
     container_name: edot-load-generator
@@ -85,12 +118,43 @@ services:
     depends_on:
       - collector
     environment:
-      # Required EDOT env vars (per EDOT Java setup guide)
+      # ── Required EDOT env vars ──────────────────────────────
       OTEL_SERVICE_NAME: "spring-petclinic"
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://collector:4318"
       OTEL_RESOURCE_ATTRIBUTES: "deployment.environment=docker-demo,service.version=3.3.0"
-      # SCA extension
+
+      # ── SCA extension — core ─────────────────────────────────
       ELASTIC_OTEL_SCA_ENABLED: "true"
-      ELASTIC_OTEL_SCA_JARS_PER_SECOND: "10"
-      # OTEL_TRACES_EXPORTER / METRICS / LOGS intentionally omitted
-      # EDOT defaults already export all signals via OTLP
+
+      # Emit up to 50 library events/second during startup burst.
+      # Lower this (e.g. 10) in production to reduce noise in the
+      # logs pipeline; raise it (e.g. 200) in CI/CD scans.
+      ELASTIC_OTEL_SCA_JARS_PER_SECOND: "50"
+
+      # Hard cap: stop after 5000 unique JARs per JVM lifetime.
+      ELASTIC_OTEL_SCA_MAX_JARS_TOTAL: "5000"
+
+      # ── SCA extension — discovery ────────────────────────────
+      # Scan java.class.path and ManagementFactory classpath before
+      # the ClassFileTransformer registers (catches never-loaded JARs).
+      ELASTIC_OTEL_SCA_SCAN_STARTUP_CLASSPATH: "true"
+
+      # Follow MANIFEST.MF Class-Path entries one level deep.
+      ELASTIC_OTEL_SCA_FOLLOW_MANIFEST_CLASSPATH: "true"
+
+      # Emit one library.loaded event per library embedded inside
+      # shaded/uber-JARs (multiple pom.properties in one JAR).
+      ELASTIC_OTEL_SCA_DETECT_SHADED_JARS: "true"
+
+      # Re-scan known classloaders every 60 s for dynamically loaded JARs.
+      ELASTIC_OTEL_SCA_REHARVEST_INTERVAL_SECONDS: "60"
+
+      # ── SCA extension — filtering ─────────────────────────────
+      # Skip JARs under java.io.tmpdir (e.g. /tmp/undertow-*, JRebel).
+      ELASTIC_OTEL_SCA_SKIP_TEMP_JARS: "true"
+
+      # Skip *-tests.jar and *-test.jar files (no executable code).
+      ELASTIC_OTEL_SCA_SKIP_TEST_JARS: "true"
+
+      # OTEL_TRACES_EXPORTER / METRICS / LOGS intentionally omitted —
+      # EDOT defaults already export all signals via OTLP.

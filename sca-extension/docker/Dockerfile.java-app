@@ -1,11 +1,30 @@
 # ============================================================
 # Dockerfile.java-app
 # Spring PetClinic instrumented with the EDOT Java agent
-# (SCA extension baked into the agent)
+# (SCA extension baked into the agent — all P1-P8 features enabled)
 #
 # Build context: repo root
 #   docker build -f sca-extension/docker/Dockerfile.java-app \
 #     -t edot-petclinic:latest .
+#
+# SCA features exercised by this image:
+#   P1: pom.properties + MANIFEST (Bundle-*, Vendor-Id, Module-Name)
+#       + Gradle .module metadata + SHA-256 + SHA-1 (new)
+#   P2: URLClassLoader.getURLs() scan of Spring Boot BOOT-INF/lib/
+#       nested JARs (jar:nested: protocol, Spring Boot 3.2+)
+#   P3: Shaded JAR detection — one event per embedded library
+#   P4: JPMS module layer scan (JDK 17 on this image)
+#   P5: Periodic re-harvest every 60 s
+#   P6: MANIFEST Class-Path entry following
+#   P7: Sources/javadoc/test JAR skip + temp JAR skip
+#   P8: SPDX license detection from Bundle-License + LICENSE files
+#
+# New OTel attributes emitted per library.loaded event:
+#   library.sha1          — 40-char hex SHA-1 (Maven Central matching)
+#   library.checksum.sha1 — same, duplicate key per OTel convention
+#   library.license       — SPDX identifier (Apache-2.0, MIT, …)
+#   library.shaded        — true when extracted from a shaded/uber-JAR
+#   library.module_type   — jar | nested-jar | shaded-entry | jpms-module
 # ============================================================
 
 # ---- Stage 1: Build Spring PetClinic from source -----------
@@ -22,42 +41,50 @@ RUN mvn package -DskipTests -q
 FROM eclipse-temurin:21-jre-jammy
 
 LABEL org.opencontainers.image.title="Spring PetClinic + EDOT Java Agent" \
-      org.opencontainers.image.description="Spring Boot demo app instrumented with EDOT Java agent (traces + metrics + logs + SCA extension)"
+      org.opencontainers.image.description="Spring Boot demo app instrumented with EDOT Java agent — traces + metrics + logs + SCA extension (P1-P8)"
 
 WORKDIR /app
 
 COPY --from=petclinic-build /src/target/spring-petclinic-*.jar app.jar
 
-# EDOT Java agent JAR (built by: ./gradlew build -x test)
+# EDOT Java agent JAR (built by: ./gradlew build -x test from repo root)
 COPY agent/build/libs/elastic-otel-javaagent-*.jar elastic-otel-javaagent.jar
-
-# Extract the Spring Boot fat JAR so each dependency becomes a real file on disk.
-# Without this, all libs are nested inside app.jar via jar:nested:// protocol and
-# the JVM never exposes them as individual code-source URLs — the SCA extension
-# would only see one JAR (the outer app.jar) instead of ~150 transitive dependencies.
-# -Djarmode=tools is available in Spring Boot 3.3+
-RUN java -Djarmode=tools -jar app.jar extract --destination extracted
 
 EXPOSE 8080
 
-# ---- Required EDOT configuration ---------------------------
-# Three required env vars (override at runtime):
-#   OTEL_SERVICE_NAME               – logical service name
-#   OTEL_EXPORTER_OTLP_ENDPOINT     – EDOT Collector URL (never APM server)
-#   OTEL_EXPORTER_OTLP_HEADERS      – "Authorization=ApiKey <key>"
+# ── Required EDOT environment variables ─────────────────────────────────
+# Three vars are mandatory for any EDOT Java deployment:
+#   OTEL_SERVICE_NAME               — logical service name in Kibana
+#   OTEL_EXPORTER_OTLP_ENDPOINT     — EDOT Collector or managed OTLP URL
+#                                     Never set this to an APM Server URL
+#   OTEL_RESOURCE_ATTRIBUTES        — key=value pairs added to every event
 #
-# Do NOT set OTEL_TRACES_EXPORTER / OTEL_METRICS_EXPORTER / OTEL_LOGS_EXPORTER
-# — EDOT defaults are already correct (all signals exported via OTLP).
-#
-# SCA extension setting (optional):
-#   ELASTIC_OTEL_SCA_ENABLED        – true | false (default: true)
-
+# Do NOT set OTEL_TRACES_EXPORTER, OTEL_METRICS_EXPORTER, or
+# OTEL_LOGS_EXPORTER — EDOT defaults are already correct (OTLP).
+# ── SCA extension environment variables ─────────────────────────────────
+# All ELASTIC_OTEL_SCA_* vars are optional; shown here with defaults.
+# Override at runtime via docker-compose.yml environment: block.
+# Required EDOT vars + SCA extension defaults
+# (all overridable via docker-compose.yml environment: block)
 ENV OTEL_SERVICE_NAME="spring-petclinic" \
     OTEL_EXPORTER_OTLP_ENDPOINT="http://collector:4318" \
-    ELASTIC_OTEL_SCA_ENABLED="true"
+    ELASTIC_OTEL_SCA_ENABLED="true" \
+    ELASTIC_OTEL_SCA_JARS_PER_SECOND="50" \
+    ELASTIC_OTEL_SCA_MAX_JARS_TOTAL="5000" \
+    ELASTIC_OTEL_SCA_SCAN_STARTUP_CLASSPATH="true" \
+    ELASTIC_OTEL_SCA_FOLLOW_MANIFEST_CLASSPATH="true" \
+    ELASTIC_OTEL_SCA_DETECT_SHADED_JARS="true" \
+    ELASTIC_OTEL_SCA_REHARVEST_INTERVAL_SECONDS="60" \
+    ELASTIC_OTEL_SCA_SKIP_TEMP_JARS="true" \
+    ELASTIC_OTEL_SCA_SKIP_TEST_JARS="true"
 
-# Attach the EDOT Java agent
+# Attach the EDOT Java agent via JAVA_TOOL_OPTIONS so it applies
+# to any java command, including the Spring Boot launcher.
 ENV JAVA_TOOL_OPTIONS="-javaagent:/app/elastic-otel-javaagent.jar"
 
-# Run the extracted JAR — Spring Boot uses BOOT-INF/lib/*.jar as real file paths
-CMD ["java", "-jar", "/app/extracted/app.jar"]
+# Run the Spring Boot fat JAR directly (no extraction needed).
+# The SCA extension's URLClassLoader scan (P2) reads BOOT-INF/lib/
+# nested JARs via Spring Boot's nested classloader, and the
+# jar:nested: protocol handler resolves each inner JAR's metadata.
+# This produces ~150 individual library.loaded events in Kibana.
+CMD ["java", "-jar", "/app/app.jar"]
