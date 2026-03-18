@@ -26,6 +26,7 @@ import java.lang.instrument.Instrumentation;
 import java.lang.reflect.Method;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.UUID;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -50,6 +51,12 @@ import java.util.logging.Logger;
 public class SCAExtension implements AutoConfigurationCustomizerProvider, AgentListener {
 
   private static final Logger logger = Logger.getLogger(SCAExtension.class.getName());
+
+  /**
+   * Stable random ID generated once per JVM process. Lets operators correlate all SCA events
+   * emitted by this agent instance even across log record streams.
+   */
+  static final String EPHEMERAL_ID = UUID.randomUUID().toString();
 
   // ---- AutoConfigurationCustomizerProvider --------------------------------
 
@@ -113,9 +120,13 @@ public class SCAExtension implements AutoConfigurationCustomizerProvider, AgentL
       return;
     }
 
+    JarCollectorService.ResourceContext resourceCtx =
+        JarCollectorService.ResourceContext.build(autoConfiguredOpenTelemetrySdk, EPHEMERAL_ID);
+
     JarCollectorService service =
         new JarCollectorService(
-            autoConfiguredOpenTelemetrySdk.getOpenTelemetrySdk(), instrumentation, config);
+            autoConfiguredOpenTelemetrySdk.getOpenTelemetrySdk(), instrumentation, config,
+            resourceCtx);
     service.start();
   }
 
