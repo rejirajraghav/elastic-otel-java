@@ -87,6 +87,8 @@ public final class JarCollectorService implements ClassFileTransformer {
       AttributeKey.stringKey("library.sha256");
   private static final AttributeKey<String> ATTR_LIBRARY_CHECKSUM_SHA256 =
       AttributeKey.stringKey("library.checksum.sha256");
+  private static final AttributeKey<String> ATTR_LIBRARY_ID =
+      AttributeKey.stringKey("library.id");
   private static final AttributeKey<String> ATTR_LIBRARY_CLASSLOADER =
       AttributeKey.stringKey("library.classloader");
 
@@ -391,11 +393,17 @@ public final class JarCollectorService implements ClassFileTransformer {
         : meta.groupId + ":" + meta.name + ":" + meta.version;
     String body = "JAR loaded: " + coords + " path=" + meta.jarPath;
 
+    // Maven coordinate for CVE advisory matching: groupId:artifactId:version
+    String libraryId = meta.groupId.isEmpty()
+        ? meta.name + ":" + meta.version
+        : meta.groupId + ":" + meta.name + ":" + meta.version;
+
     AttributesBuilder attrs = Attributes.builder()
         // Library identity (FIX 1)
         .put(ATTR_LIBRARY_NAME, meta.name)
         .put(ATTR_LIBRARY_VERSION, meta.version)
         .put(ATTR_LIBRARY_GROUP_ID, meta.groupId)
+        .put(ATTR_LIBRARY_ID, libraryId)
         .put(ATTR_LIBRARY_TYPE, "jar")
         .put(ATTR_LIBRARY_LANGUAGE, "java")
         .put(ATTR_LIBRARY_PATH, meta.jarPath)
